@@ -16,13 +16,13 @@ __global__ void matrixMulKernel(float* c, float* a, float* b, int cWidth, int cH
 	}
 }
 
-float matrixMul(float* c, float* a, float* b, int cWidth, int cHeight, int aWidth) {
-	CudaBuffer<float> aBuff(aWidth * cHeight);
-	CudaBuffer<float> bBuff(cWidth * aWidth);
-	CudaBuffer<float> cBuff(cWidth * cHeight);
-
-	checkCudaError(cudaMemcpy(aBuff(), a, aBuff.dataSize(), cudaMemcpyHostToDevice));
-	checkCudaError(cudaMemcpy(bBuff(), b, bBuff.dataSize(), cudaMemcpyHostToDevice));
+float matrixMul(CudaBuffer<float>& cHost, CudaBuffer<float>& aHost, CudaBuffer<float>& bHost,
+	            int cWidth, int cHeight, int aWidth) {
+	CudaBuffer<float> aDev(aWidth * cHeight, cudaMemoryTypeDevice);
+	CudaBuffer<float> bDev(cWidth * aWidth, cudaMemoryTypeDevice);
+	CudaBuffer<float> cDev(cWidth * cHeight, cudaMemoryTypeDevice);
+	aDev.copyFrom(aHost);
+	bDev.copyFrom(bHost);
 
 	dim3 blockSize(16, 16);
 	dim3 gridSize((cWidth + blockSize.x - 1) / blockSize.x,
@@ -31,14 +31,14 @@ float matrixMul(float* c, float* a, float* b, int cWidth, int cHeight, int aWidt
 	float elapsedTime;
 	CudaEvent start, stop;
 	checkCudaError(cudaEventRecord(start(), 0));
-	matrixMulKernel<<<gridSize, blockSize>>> (cBuff(), aBuff(), bBuff(), cWidth, cHeight, aWidth);
+	matrixMulKernel<<<gridSize, blockSize>>> (cDev(), aDev(), bDev(), cWidth, cHeight, aWidth);
 	checkCudaError(cudaGetLastError());
 	checkCudaError(cudaEventRecord(stop(), 0));
 	checkCudaError(cudaEventSynchronize(stop()));
 	checkCudaError(cudaEventElapsedTime(&elapsedTime, start(), stop()));
 
 	checkCudaError(cudaDeviceSynchronize());
-	checkCudaError(cudaMemcpy(c, cBuff(), cBuff.dataSize(), cudaMemcpyDeviceToHost));
+	cHost.copyFrom(cDev);
 
 	return elapsedTime;
 }
@@ -56,17 +56,17 @@ void matrixMulRef(float* c, float* a, float* b, int cWidth, int cHeight, int aWi
 }
 
 void testMatrixMul(int cWidth, int cHeight, int aWidth) {
-	std::vector<float> a(aWidth * cHeight);
-	std::vector<float> b(cWidth * aWidth);
-	fillVectorRandom(a);
-	fillVectorRandom(b);
+	CudaBuffer<float> a(aWidth * cHeight, cudaMemoryTypeHost);
+	CudaBuffer<float> b(cWidth * aWidth, cudaMemoryTypeHost);
+	a.fillWithRandom();
+	b.fillWithRandom();
 
-	std::vector<float> c(cWidth * cHeight);
-	std::vector<float> cRef(cWidth * cHeight);
-	float time = matrixMul(c.data(), a.data(), b.data(), cWidth, cHeight, aWidth);
-	matrixMulRef(cRef.data(), a.data(), b.data(), cWidth, cHeight, aWidth);
+	CudaBuffer<float> c(cWidth * cHeight, cudaMemoryTypeHost);
+	CudaBuffer<float> cRef(cWidth * cHeight, cudaMemoryTypeHost);
+	float time = matrixMul(c, a, b, cWidth, cHeight, aWidth);
+	matrixMulRef(cRef(), a(), b(), cWidth, cHeight, aWidth);
 
-	bool pass = compareVectors(c, cRef);
+	bool pass = c.approxEqual(cRef);
 	std::string name = "MatrixMul(";
 	name += std::to_string(cWidth) + "x";
 	name += std::to_string(cHeight);
@@ -77,5 +77,5 @@ void testMatrixMul(int cWidth, int cHeight, int aWidth) {
 void testMatrixMul() {
 	checkCudaError(cudaSetDevice(0));
 	testMatrixMul(512, 256, 1024);
-	checkCudaError(cudaDeviceReset()); // is this a right place?
+	checkCudaError(cudaDeviceReset());
 }

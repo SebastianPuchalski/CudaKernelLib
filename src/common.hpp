@@ -2,51 +2,140 @@
 
 #include <string>
 #include <vector>
+#include <cassert>
+#include <random>
 
 #include "cuda_runtime.h"
 
 void printTestHeader();
 void printTestItem(const std::string& name, float time, bool pass);
 
-void fillVectorRandom(std::vector<float>& vec, float min = 0, float max = 1);
-bool compareVectors(const std::vector<float>& vec1,
-	                const std::vector<float>& vec2,
-	                float maxDiff = 1e-6);
-
 bool checkCudaError(cudaError_t cudaError, bool noThrow = false);
 
 template <typename T>
 class CudaBuffer {
 	int elNumber;
+	cudaMemoryType memType;
 	T* data;
+
 public:
-	CudaBuffer(int size): elNumber(size), data(nullptr) {
-		checkCudaError(cudaMalloc((void**)&data, size * sizeof(T)));
+	CudaBuffer(int size, cudaMemoryType type): elNumber(size), memType(type), data(nullptr) {
+		switch (type) {
+		case cudaMemoryTypeHost:
+			data = new T[size];
+			break;
+		case cudaMemoryTypeDevice:
+			checkCudaError(cudaMalloc(&data, size * sizeof(T)));
+			break;
+		case cudaMemoryTypeManaged:
+			checkCudaError(cudaMallocManaged(&data, size * sizeof(T)));
+			break;
+		default:
+			assert(!"Wrong buffer type!");
+		};
 	}
+
 	virtual ~CudaBuffer() {
-		if(data)
-			checkCudaError(cudaFree(data), true);
+		if (data) {
+			switch (memType) {
+			case cudaMemoryTypeHost:
+				delete[] data;
+				break;
+			case cudaMemoryTypeDevice:
+			case cudaMemoryTypeManaged:
+				checkCudaError(cudaFree(data), true);
+				break;
+			};
+		}
 	}
+
 	CudaBuffer(const CudaBuffer&) = delete;
 	CudaBuffer& operator=(const CudaBuffer&) = delete;
 	CudaBuffer(CudaBuffer&&) = delete;
 	CudaBuffer& operator=(CudaBuffer&&) = delete;
-	int size() {
-		return elNumber;
+
+	bool operator==(const CudaBuffer& rhs) const {
+		assert(memType != cudaMemoryTypeDevice);
+		if (elNumber != rhs.elNumber)
+			return false;
+		for (int i = 0; i < elNumber; i++) {
+			if (data[i] != rhs.data[i])
+				return false;
+		}
+		return true;
 	}
-	int dataSize() {
-		return elNumber * sizeof(T);
+
+	bool approxEqual(const CudaBuffer<float>& rhs, float maxRelDiff = 1e-6) const {
+		assert(memType != cudaMemoryTypeDevice);
+		if (elNumber != rhs.elNumber)
+			return false;
+		for (int i = 0; i < elNumber; i++) {
+			float a = data[i];
+			float b = rhs.data[i];
+			float diff = abs(a - b);
+			float mean = (abs(a) + abs(b)) / 2.0f;
+			if (diff / (mean + FLT_MIN) > maxRelDiff)
+				return false;
+		}
+		return true;
 	}
-	T* operator()() {
+
+	T* operator()() const {
 		return data;
 	}
-	// TODO:
-	// - not only device but also host and unified memory
-	// - operator= for memcpy
-	// - shared_ptr typedef
-	// - fill with zeros
-	// - fill with random values
-	// - operator== (for host only?)
+
+	int size() const {
+		return elNumber;
+	}
+
+	int dataSize() const {
+		return elNumber * sizeof(T);
+	}
+
+	cudaMemoryType type() const {
+		return memType;
+	}
+
+	void fillWithZeros() {
+		assert(memType != cudaMemoryTypeDevice);
+		for (int i = 0; i < elNumber; i++) {
+			data[i] = 0;
+		}
+	}
+
+	CudaBuffer& copyFrom(const CudaBuffer& rhs) {
+		assert(dataSize() == rhs.dataSize());
+		cudaMemcpyKind kind;
+		if (rhs.memType == cudaMemoryTypeManaged || memType == cudaMemoryTypeManaged) {
+			assert(memType == cudaMemoryTypeManaged);
+			assert(rhs.memType == cudaMemoryTypeManaged);
+			kind = cudaMemcpyDefault;
+		}
+		else {
+			if (rhs.memType == cudaMemoryTypeHost && memType == cudaMemoryTypeHost)
+				kind = cudaMemcpyHostToHost;
+			else if (rhs.memType == cudaMemoryTypeHost && memType == cudaMemoryTypeDevice)
+				kind = cudaMemcpyHostToDevice;
+			else if (rhs.memType == cudaMemoryTypeDevice && memType == cudaMemoryTypeHost)
+				kind = cudaMemcpyDeviceToHost;
+			else if (rhs.memType == cudaMemoryTypeDevice && memType == cudaMemoryTypeDevice)
+				kind = cudaMemcpyDeviceToDevice;
+			else
+				assert(!"Incompatible buffer types!");
+		}
+		checkCudaError(cudaMemcpy(data, rhs.data, dataSize(), kind));
+		return *this;
+	}
+
+	void fillWithRandom(float min = 0, float max = 1) {
+		assert(memType != cudaMemoryTypeDevice);
+		static const unsigned seed = 3870562;
+		static std::mt19937 gen(seed);
+		std::uniform_real_distribution<float> dist(min, max);
+		for (int i = 0; i < elNumber; i++) {
+			data[i] = dist(gen);
+		}
+	}
 };
 
 class CudaEvent {
@@ -66,5 +155,6 @@ public:
 	cudaEvent_t operator()() {
 		return event;
 	}
-	// TODO: shared_ptr typedef
 };
+
+// TODO: shared_ptr typedef for CudaBuffer and CudaEvent
