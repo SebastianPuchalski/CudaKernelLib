@@ -12,6 +12,8 @@ void printTestItem(const std::string& name, float time, bool pass);
 
 bool checkCudaError(cudaError_t cudaError, bool noThrow = false);
 
+void printDeviceProperties(int device = 0);
+
 template <typename T>
 class CudaBuffer {
 	int elNumber;
