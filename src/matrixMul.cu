@@ -3,7 +3,7 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
-__global__ void matrixMulKernelNaive(float* c, float* a, float* b, int cWidth, int cHeight, int aWidth)
+__global__ void matrixMulKernelNaive(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth)
 {
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -16,24 +16,23 @@ __global__ void matrixMulKernelNaive(float* c, float* a, float* b, int cWidth, i
 	}
 }
 
-void matrixMulNaive(float* c, float* a, float* b, int cWidth, int cHeight, int aWidth) {
+void matrixMulNaive(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth) {
 	dim3 blockSize(32, 32);
 	dim3 gridSize((cWidth + blockSize.x - 1) / blockSize.x,
 		(cHeight + blockSize.y - 1) / blockSize.y);
 	matrixMulKernelNaive<<<gridSize, blockSize>>>(c, a, b, cWidth, cHeight, aWidth);
 }
 
-__global__ void matrixMulKernelTiled(float* c, float* a, float* b, int cWidth, int aWidth)
+__global__ void matrixMulKernelTiled(float* c, const float* a, const float* b, int cWidth, int aWidth)
 {
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-	const int tileSize = 32;
+	const int tileSize = 16;
 	assert(blockDim.x == tileSize && blockDim.y == tileSize);
 
-	const int sharedSize = tileSize * tileSize;
-	__shared__ float aShared[sharedSize];
-	__shared__ float bShared[sharedSize];
+	__shared__ float aShared[tileSize * tileSize];
+	__shared__ float bShared[tileSize * tileSize];
 
 	float sum = 0;
 
@@ -52,8 +51,8 @@ __global__ void matrixMulKernelTiled(float* c, float* a, float* b, int cWidth, i
 	c[y * cWidth + x] = sum;
 }
 
-void matrixMulTiled(float* c, float* a, float* b, int cWidth, int cHeight, int aWidth) {
-	const int tileSize = 32;
+void matrixMulTiled(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth) {
+	const int tileSize = 16;
 	assert(cWidth % tileSize == 0);
 	assert(cHeight % tileSize == 0);
 	assert(aWidth % tileSize == 0);
@@ -62,13 +61,13 @@ void matrixMulTiled(float* c, float* a, float* b, int cWidth, int cHeight, int a
 	matrixMulKernelTiled<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
 }
 
-using KernelFunction = void(*)(float*, float*, float*, int, int, int);
+using KernelFunction = void(*)(float*, const float*, const float*, int, int, int);
 
-float matrixMul(CudaBuffer<float>& cHost, CudaBuffer<float>& aHost, CudaBuffer<float>& bHost,
+float matrixMul(CudaBuffer<float>& cHost, const CudaBuffer<float>& aHost, const CudaBuffer<float>& bHost,
 	            int cWidth, int cHeight, int aWidth, KernelFunction kernelFunc) {
-	CudaBuffer<float> aDev(aWidth * cHeight, cudaMemoryTypeDevice);
-	CudaBuffer<float> bDev(cWidth * aWidth, cudaMemoryTypeDevice);
-	CudaBuffer<float> cDev(cWidth * cHeight, cudaMemoryTypeDevice);
+	CudaBuffer<float> cDev(cHost.size(), cudaMemoryTypeDevice);
+	CudaBuffer<float> aDev(aHost.size(), cudaMemoryTypeDevice);
+	CudaBuffer<float> bDev(bHost.size(), cudaMemoryTypeDevice);
 	aDev.copyFrom(aHost);
 	bDev.copyFrom(bHost);
 
@@ -87,7 +86,8 @@ float matrixMul(CudaBuffer<float>& cHost, CudaBuffer<float>& aHost, CudaBuffer<f
 	return elapsedTime;
 }
 
-void matrixMulRef(float* c, float* a, float* b, int cWidth, int cHeight, int aWidth) { // row-major order
+void matrixMulRef(float* c, const float* a, const float* b,
+	              int cWidth, int cHeight, int aWidth) { // row-major order
 	for (int y = 0; y < cHeight; y++) {
 		for (int x = 0; x < cWidth; x++) {
 			float sum = 0;
@@ -99,7 +99,9 @@ void matrixMulRef(float* c, float* a, float* b, int cWidth, int cHeight, int aWi
 	}
 }
 
-void testMatrixMul(int cWidth, int cHeight, int aWidth, KernelFunction kernelFunc) {
+void testMatrixMul(int cWidth, int cHeight, int aWidth,
+	               KernelFunction kernelFunc, const std::string& kernelName = "") {
+	assert(cWidth > 0 && cHeight > 0 && aWidth > 0);
 	CudaBuffer<float> a(aWidth * cHeight, cudaMemoryTypeHost);
 	CudaBuffer<float> b(cWidth * aWidth, cudaMemoryTypeHost);
 	a.fillWithRandom();
@@ -111,7 +113,8 @@ void testMatrixMul(int cWidth, int cHeight, int aWidth, KernelFunction kernelFun
 	matrixMulRef(cRef(), a(), b(), cWidth, cHeight, aWidth);
 
 	bool pass = c.approxEqual(cRef);
-	std::string name = "MatrixMul(";
+	std::string name = "MatrixMul";
+	name += kernelName + "(";
 	name += std::to_string(cWidth) + "x";
 	name += std::to_string(cHeight);
 	name += ", " + std::to_string(aWidth) + ")";
@@ -121,8 +124,8 @@ void testMatrixMul(int cWidth, int cHeight, int aWidth, KernelFunction kernelFun
 void testMatrixMul() {
 	checkCudaError(cudaSetDevice(0));
 
-	testMatrixMul(1024, 1024, 1024, matrixMulNaive);
-	testMatrixMul(1024, 1024, 1024, matrixMulTiled);
+	testMatrixMul(1024, 1024, 1024, matrixMulNaive, "Naive");
+	testMatrixMul(1024, 1024, 1024, matrixMulTiled, "Tiled");
 
 	checkCudaError(cudaDeviceReset());
 }

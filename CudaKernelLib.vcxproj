@@ -16,9 +16,11 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\common.hpp" />
+    <ClInclude Include="src\geglu.cuh" />
     <ClInclude Include="src\matrixMul.cuh" />
   </ItemGroup>
   <ItemGroup>
+    <CudaCompile Include="src\geglu.cu" />
     <CudaCompile Include="src\matrixMul.cu" />
   </ItemGroup>
   <PropertyGroup Label="Globals">

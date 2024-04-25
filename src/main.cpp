@@ -1,10 +1,12 @@
 #include "common.hpp"
 #include "matrixMul.cuh"
+#include "geglu.cuh"
 
 #include <iostream>
 
 void test() {
 	testMatrixMul();
+	testGeGLU();
 }
 
 int main(int argc, char *argv[]) {
