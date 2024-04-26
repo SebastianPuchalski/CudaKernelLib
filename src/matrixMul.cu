@@ -31,19 +31,18 @@ __global__ void matrixMulKernelTiled(float* c, const float* a, const float* b, i
 	const int tileSize = 16;
 	assert(blockDim.x == tileSize && blockDim.y == tileSize);
 
-	__shared__ float aShared[tileSize * tileSize];
-	__shared__ float bShared[tileSize * tileSize];
+	__shared__ float aShared[tileSize][tileSize];
+	__shared__ float bShared[tileSize][tileSize];
 
 	float sum = 0;
 
 	for (int i = 0; i < aWidth; i += tileSize) {
-		int sharedIdx = threadIdx.y * tileSize + threadIdx.x;
-		aShared[sharedIdx] = a[y * aWidth + i + threadIdx.x];
-		bShared[sharedIdx] = b[(i + threadIdx.y) * cWidth + x];
+		aShared[threadIdx.y][threadIdx.x] = a[y * aWidth + (i + threadIdx.x)];
+		bShared[threadIdx.y][threadIdx.x] = b[(i + threadIdx.y) * cWidth + x];
 		__syncthreads();
 
 		for (int j = 0; j < tileSize; j++) {
-			sum += aShared[threadIdx.y * tileSize + j] * bShared[j * tileSize + threadIdx.x];
+			sum += aShared[threadIdx.y][j] * bShared[j][threadIdx.x];
 		}
 		__syncthreads();
 	}
@@ -71,14 +70,13 @@ float matrixMul(CudaBuffer<float>& cHost, const CudaBuffer<float>& aHost, const 
 	aDev.copyFrom(aHost);
 	bDev.copyFrom(bHost);
 
-	float elapsedTime;
 	CudaEvent start, stop;
-	checkCudaError(cudaEventRecord(start(), 0));
+	start.record();
 	kernelFunc(cDev(), aDev(), bDev(), cWidth, cHeight, aWidth);
 	checkCudaError(cudaGetLastError());
-	checkCudaError(cudaEventRecord(stop(), 0));
-	checkCudaError(cudaEventSynchronize(stop()));
-	checkCudaError(cudaEventElapsedTime(&elapsedTime, start(), stop()));
+	stop.record();
+	stop.synchronize();
+	float elapsedTime = start.elapsedTime(stop);
 
 	checkCudaError(cudaDeviceSynchronize());
 	cHost.copyFrom(cDev);
@@ -127,5 +125,6 @@ void testMatrixMul() {
 	testMatrixMul(1024, 1024, 1024, matrixMulNaive, "Naive");
 	testMatrixMul(1024, 1024, 1024, matrixMulTiled, "Tiled");
 
+	checkCudaError(cudaGetLastError());
 	checkCudaError(cudaDeviceReset());
 }

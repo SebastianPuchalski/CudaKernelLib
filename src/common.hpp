@@ -12,7 +12,7 @@ void printTestItem(const std::string& name, float time, bool pass);
 
 bool checkCudaError(cudaError_t cudaError, bool noThrow = false);
 
-void printDeviceProperties(int device = 0);
+void printDevicesProperties();
 
 template <typename T>
 class CudaBuffer {
@@ -142,20 +142,50 @@ public:
 
 class CudaEvent {
 	cudaEvent_t event;
+
 public:
 	CudaEvent(): event(0) {
 		checkCudaError(cudaEventCreate(&event));
 	}
+
+	CudaEvent(unsigned int flags) : event(0) {
+		checkCudaError(cudaEventCreateWithFlags(&event, flags));
+	}
+
 	virtual ~CudaEvent() {
 		if(event)
 			checkCudaError(cudaEventDestroy(event), true);
 	}
+
 	CudaEvent(const CudaEvent&) = delete;
 	CudaEvent& operator=(const CudaEvent&) = delete;
 	CudaEvent(CudaEvent&&) = delete;
 	CudaEvent& operator=(CudaEvent&&) = delete;
+
 	cudaEvent_t operator()() {
 		return event;
+	}
+
+	void record(cudaStream_t stream = (cudaStream_t)0) {
+		checkCudaError(cudaEventRecord(event, stream));
+	}
+
+	void recordWithFlags(cudaStream_t stream = (cudaStream_t)0, unsigned int flags = 0) {
+		checkCudaError(cudaEventRecordWithFlags(event, stream, flags));
+	}
+
+	void synchronize() {
+		checkCudaError(cudaEventSynchronize(event));
+	}
+
+	void query() {
+		checkCudaError(cudaEventQuery(event));
+	}
+
+	float elapsedTime(CudaEvent& stop) {
+		float elapsedTime;
+		checkCudaError(cudaEventElapsedTime(&elapsedTime, event, stop()));
+		return elapsedTime;
 	}
 };
 

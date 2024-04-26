@@ -36,14 +36,13 @@ float geglu(CudaBuffer<float>& outTensor, const CudaBuffer<float>& inTensor,
 	CudaBuffer<float> inTensorDev(inTensor.size(), cudaMemoryTypeDevice);
 	inTensorDev.copyFrom(inTensor);
 
-	float elapsedTime;
 	CudaEvent start, stop;
-	checkCudaError(cudaEventRecord(start(), 0));
+	start.record();
 	kernelFunc(outTensorDev(), inTensorDev(), batchSize, dim);
 	checkCudaError(cudaGetLastError());
-	checkCudaError(cudaEventRecord(stop(), 0));
-	checkCudaError(cudaEventSynchronize(stop()));
-	checkCudaError(cudaEventElapsedTime(&elapsedTime, start(), stop()));
+	stop.record();
+	stop.synchronize();
+	float elapsedTime = start.elapsedTime(stop);
 
 	checkCudaError(cudaDeviceSynchronize());
 	outTensor.copyFrom(outTensorDev);
@@ -91,5 +90,6 @@ void testGeGLU() {
 	testGeGLU(64, 4096, geglu);
 	testGeGLU(256, 4096, geglu);
 
+	checkCudaError(cudaGetLastError());
 	checkCudaError(cudaDeviceReset());
 }
