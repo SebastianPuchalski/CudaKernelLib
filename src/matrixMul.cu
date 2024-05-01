@@ -88,30 +88,36 @@ __global__ void matrixMulKernelFast(float* c, const float* a, const float* b, in
 		}
 		__syncthreads();
 
-		float* a = (float*)aShared;
-		float* b = (float*)bShared;
+		float* aS = (float*)aShared + threadIdx.y * tileSize * blockSize * tileSize;
+		float* bS = (float*)bShared + (threadIdx.x * tileSize);
 
         #pragma unroll
 		for (int j = 0; j < blockSize * tileSize; j++) {
-			row0.x += a[(threadIdx.y * tileSize + 0) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 0)];
-			row0.y += a[(threadIdx.y * tileSize + 0) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 1)];
-			row0.z += a[(threadIdx.y * tileSize + 0) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 2)];
-			row0.w += a[(threadIdx.y * tileSize + 0) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 3)];
+			float a0 = aS[0 * blockSize * tileSize + j];
+			float a1 = aS[1 * blockSize * tileSize + j];
+			float a2 = aS[2 * blockSize * tileSize + j];
+			float a3 = aS[3 * blockSize * tileSize + j];
+			float4 b = *((float4*)(bS + j * blockSize * tileSize));
 
-			row1.x += a[(threadIdx.y * tileSize + 1) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 0)];
-			row1.y += a[(threadIdx.y * tileSize + 1) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 1)];
-			row1.z += a[(threadIdx.y * tileSize + 1) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 2)];
-			row1.w += a[(threadIdx.y * tileSize + 1) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 3)];
+			row0.x += a0 * b.x;
+			row0.y += a0 * b.y;
+			row0.z += a0 * b.z;
+			row0.w += a0 * b.w;
 
-			row2.x += a[(threadIdx.y * tileSize + 2) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 0)];
-			row2.y += a[(threadIdx.y * tileSize + 2) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 1)];
-			row2.z += a[(threadIdx.y * tileSize + 2) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 2)];
-			row2.w += a[(threadIdx.y * tileSize + 2) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 3)];
+			row1.x += a1 * b.x;
+			row1.y += a1 * b.y;
+			row1.z += a1 * b.z;
+			row1.w += a1 * b.w;
 
-			row3.x += a[(threadIdx.y * tileSize + 3) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 0)];
-			row3.y += a[(threadIdx.y * tileSize + 3) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 1)];
-			row3.z += a[(threadIdx.y * tileSize + 3) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 2)];
-			row3.w += a[(threadIdx.y * tileSize + 3) * blockSize * tileSize + j] * b[j * blockSize * tileSize + (threadIdx.x * tileSize + 3)];
+			row2.x += a2 * b.x;
+			row2.y += a2 * b.y;
+			row2.z += a2 * b.z;
+			row2.w += a2 * b.w;
+
+			row3.x += a3 * b.x;
+			row3.y += a3 * b.y;
+			row3.z += a3 * b.z;
+			row3.w += a3 * b.w;
 		}
 		__syncthreads();
 	}
