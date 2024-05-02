@@ -262,14 +262,46 @@ float matrixMul(CudaBuffer<float>& cHost, const CudaBuffer<float>& aHost, const 
 }
 
 void matrixMulRef(float* c, const float* a, const float* b,
-	              int cWidth, int cHeight, int aWidth) { // row-major order
-	for (int y = 0; y < cHeight; y++) {
-		for (int x = 0; x < cWidth; x++) {
-			float sum = 0;
-			for (int i = 0; i < aWidth; i++) {
-				sum += a[y * aWidth + i] * b[i * cWidth + x];
+	int cWidth, int cHeight, int aWidth, bool tiled = true) { // row-major order
+	if (!tiled) {
+		for (int y = 0; y < cHeight; y++) {
+			for (int x = 0; x < cWidth; x++) {
+				float sum = 0;
+				for (int i = 0; i < aWidth; i++) {
+					sum += a[y * aWidth + i] * b[i * cWidth + x];
+				}
+				c[y * cWidth + x] = sum;
 			}
-			c[y * cWidth + x] = sum;
+		}
+	}
+	else {
+		const int tileSize = 128;
+		float accum[tileSize][tileSize];
+		for (int ty = 0; ty < cHeight; ty += tileSize) {
+			for (int tx = 0; tx < cWidth; tx += tileSize) {
+				int tileWidth = std::min(cWidth - tx, tileSize);
+				int tileHeight = std::min(cHeight - ty, tileSize);
+				for (int y = 0; y < tileHeight; y++) {
+					for (int x = 0; x < tileWidth; x++) {
+						accum[y][x] = 0;
+					}
+				}
+				for (int i = 0; i < aWidth; i++) {
+					const float* aPtr = a + ty * aWidth + i;
+					const float* bPtr = b + i * cWidth + tx;
+					for (int y = 0; y < tileHeight; y++) {
+						float aValue = aPtr[y * aWidth];
+						for (int x = 0; x < tileWidth; x++) {
+							accum[y][x] += aValue * bPtr[x];
+						}
+					}
+				}
+				for (int y = 0; y < tileHeight; y++) {
+					for (int x = 0; x < tileWidth; x++) {
+						c[(ty + y) * cWidth + (tx + x)] = accum[y][x];
+					}
+				}
+			}
 		}
 	}
 }
