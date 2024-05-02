@@ -188,5 +188,3 @@ public:
 		return elapsedTime;
 	}
 };
-
-// TODO: shared_ptr typedef for CudaBuffer and CudaEvent

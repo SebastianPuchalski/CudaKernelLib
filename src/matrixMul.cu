@@ -51,7 +51,6 @@ __global__ void matrixMulKernelSTiled(float* c, const float* a, const float* b, 
 }
 
 void matrixMulSTiled(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth) {
-	//checkCudaError(cudaFuncSetAttribute(matrixMulKernelTiled, cudaFuncAttributePreferredSharedMemoryCarveout, 50));
 	const int tileSize = 16;
 	assert(cWidth % tileSize == 0);
 	assert(cHeight % tileSize == 0);
@@ -83,8 +82,10 @@ __global__ void matrixMulKernelSTTiled(float* c, const float* a, const float* b,
 	for (int i = 0; i < aWidth; i += blockSize * tileSize) {
 		#pragma unroll
 		for (int j = 0; j < tileSize; j++) {
-			aShared[(threadIdx.y * tileSize + j) * blockSize + threadIdx.x] = *((const float4*)(a + ((y * tileSize + j) * aWidth + (i + threadIdx.x * tileSize))));
-			bShared[(threadIdx.y * tileSize + j) * blockSize + threadIdx.x] = *((const float4*)(b + ((i + threadIdx.y * tileSize + j) * cWidth + (x * tileSize))));
+			aShared[(threadIdx.y * tileSize + j) * blockSize + threadIdx.x] =
+				*((const float4*)(a + ((y * tileSize + j) * aWidth + (i + threadIdx.x * tileSize))));
+			bShared[(threadIdx.y * tileSize + j) * blockSize + threadIdx.x] =
+				*((const float4*)(b + ((i + threadIdx.y * tileSize + j) * cWidth + (x * tileSize))));
 		}
 		__syncthreads();
 
@@ -149,7 +150,6 @@ void matrixMulSTTiled(float* c, const float* a, const float* b, int cWidth, int 
 
 template <int width, int height, int threadCount>
 __device__ void loadRect(float* dst, const float* src, int srcStride, int thread) {
-	assert(threadCount % (width / 4) == 0);
 	const int w = width / 4;
 	const int h = threadCount / w;
 	assert(threadCount % w == 0);
@@ -235,6 +235,137 @@ void matrixMulSWTiled(float* c, const float* a, const float* b, int cWidth, int 
 	assert(cHeight % accumSize.y == 0);
 	dim3 gridSize(cWidth / accumSize.x, cHeight / accumSize.y);
 	matrixMulKernelSWTiled<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
+}
+
+template <int width, int height, int threadCount>
+__device__ void loadRectT(float* dst, const float* src, int srcStride, int thread) {
+	const int w = width / 4;
+	const int h = threadCount / w;
+	assert(threadCount % w == 0);
+
+	int ty = thread / w;
+	int tx = thread - (ty * w);
+	src += tx * 4;
+
+#pragma unroll
+	for (int i = ty; i < height; i += h) {
+		float4 v = *reinterpret_cast<const float4*>(src + i * srcStride);
+		dst[(tx * 4 + 0) * height + i] = v.x;
+		dst[(tx * 4 + 1) * height + i] = v.y;
+		dst[(tx * 4 + 2) * height + i] = v.z;
+		dst[(tx * 4 + 3) * height + i] = v.w;
+	}
+}
+
+__global__ void matrixMulKernelFast(float* c, const float* a, const float* b, int cWidth, int aWidth)
+{
+	const int sharedSize = 32;
+	const int tileWidth = 32;
+	const int tileHeight = 64;
+	const int gridWidth = 4;
+	const int gridHeight = 2;
+	assert(blockDim.x == tileWidth);
+	assert(blockDim.y == gridWidth && blockDim.z == gridHeight);
+	const int threadCount = tileWidth * gridWidth * gridHeight;
+	const int vecSize = sizeof(float4) / sizeof(float);
+
+	const int warpWidth = tileWidth / vecSize / 2;
+	const int warpHeight = tileHeight / vecSize / 2;
+	assert(warpWidth * warpHeight == 32);
+	const int bStride = gridWidth * tileWidth / vecSize;
+	const int aStride = gridHeight * tileHeight / vecSize;
+
+	int warpThread = threadIdx.x;
+	int tileX = threadIdx.y;
+	int tileY = threadIdx.z;
+	int thread = (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;
+	int threadX = warpThread % warpWidth;
+	int threadY = warpThread / warpWidth;
+	int x = blockIdx.x * blockDim.y * tileWidth;
+	int y = blockIdx.y * blockDim.z * tileHeight;
+
+	__shared__ float aS[sharedSize * gridHeight * tileHeight];
+	__shared__ float bS[sharedSize * gridWidth * tileWidth];
+
+	float4 accum00[vecSize];
+	float4 accum01[vecSize];
+	float4 accum10[vecSize];
+	float4 accum11[vecSize];
+    #pragma unroll
+	for (int i = 0; i < vecSize; i++) {
+		accum00[i] = accum01[i] = accum10[i] = accum11[i] = make_float4(0.f, 0.f, 0.f, 0.f);
+	}
+
+	a += y * aWidth;
+	b += x;
+
+	for (int i = 0; i < aWidth; i += sharedSize) {
+		loadRectT<sharedSize, gridHeight * tileHeight, threadCount>((float*)aS, a + i, aWidth, thread);
+		loadRect<gridWidth * tileWidth, sharedSize, threadCount>((float*)bS, b + i * cWidth, cWidth, thread);
+		__syncthreads();
+
+		float4* b = reinterpret_cast<float4*>(bS + tileX * tileWidth) + threadX;
+		float4* a = reinterpret_cast<float4*>(aS + tileY * tileHeight) + threadY;
+
+        #pragma unroll
+		for (int j = 0; j < sharedSize; j++) {
+			float4 b0, b1;
+			b0 = b[j * bStride];
+			b1 = b[j * bStride + warpWidth];
+			float4 a0, a1;
+			a0 = a[j * aStride];
+			a1 = a[j * aStride + warpHeight];
+
+			accum00[0].x += a0.x * b0.x; accum00[0].y += a0.x * b0.y; accum00[0].z += a0.x * b0.z; accum00[0].w += a0.x * b0.w;
+			accum00[1].x += a0.y * b0.x; accum00[1].y += a0.y * b0.y; accum00[1].z += a0.y * b0.z; accum00[1].w += a0.y * b0.w;
+			accum00[2].x += a0.z * b0.x; accum00[2].y += a0.z * b0.y; accum00[2].z += a0.z * b0.z; accum00[2].w += a0.z * b0.w;
+			accum00[3].x += a0.w * b0.x; accum00[3].y += a0.w * b0.y; accum00[3].z += a0.w * b0.z; accum00[3].w += a0.w * b0.w;
+
+			accum01[0].x += a0.x * b1.x; accum01[0].y += a0.x * b1.y; accum01[0].z += a0.x * b1.z; accum01[0].w += a0.x * b1.w;
+			accum01[1].x += a0.y * b1.x; accum01[1].y += a0.y * b1.y; accum01[1].z += a0.y * b1.z; accum01[1].w += a0.y * b1.w;
+			accum01[2].x += a0.z * b1.x; accum01[2].y += a0.z * b1.y; accum01[2].z += a0.z * b1.z; accum01[2].w += a0.z * b1.w;
+			accum01[3].x += a0.w * b1.x; accum01[3].y += a0.w * b1.y; accum01[3].z += a0.w * b1.z; accum01[3].w += a0.w * b1.w;
+
+			accum10[0].x += a1.x * b0.x; accum10[0].y += a1.x * b0.y; accum10[0].z += a1.x * b0.z; accum10[0].w += a1.x * b0.w;
+			accum10[1].x += a1.y * b0.x; accum10[1].y += a1.y * b0.y; accum10[1].z += a1.y * b0.z; accum10[1].w += a1.y * b0.w;
+			accum10[2].x += a1.z * b0.x; accum10[2].y += a1.z * b0.y; accum10[2].z += a1.z * b0.z; accum10[2].w += a1.z * b0.w;
+			accum10[3].x += a1.w * b0.x; accum10[3].y += a1.w * b0.y; accum10[3].z += a1.w * b0.z; accum10[3].w += a1.w * b0.w;
+
+			accum11[0].x += a1.x * b1.x; accum11[0].y += a1.x * b1.y; accum11[0].z += a1.x * b1.z; accum11[0].w += a1.x * b1.w;
+			accum11[1].x += a1.y * b1.x; accum11[1].y += a1.y * b1.y; accum11[1].z += a1.y * b1.z; accum11[1].w += a1.y * b1.w;
+			accum11[2].x += a1.z * b1.x; accum11[2].y += a1.z * b1.y; accum11[2].z += a1.z * b1.z; accum11[2].w += a1.z * b1.w;
+			accum11[3].x += a1.w * b1.x; accum11[3].y += a1.w * b1.y; accum11[3].z += a1.w * b1.z; accum11[3].w += a1.w * b1.w;
+		}
+		__syncthreads();
+	}
+
+	x += tileX * tileWidth + threadX * vecSize;
+	y += tileY * tileHeight + threadY * vecSize;
+	float4* out = reinterpret_cast<float4*>(c + y * cWidth + x);
+	int outStride = cWidth >> 2;
+	#pragma unroll
+	for (int i = 0; i < vecSize; i++) {
+		out[i * outStride] = accum00[i];
+		out[i * outStride + warpWidth] = accum01[i];
+		out[i * outStride + warpHeight * cWidth] = accum10[i];
+		out[i * outStride + warpHeight * cWidth + warpWidth] = accum11[i];
+	}
+}
+
+void matrixMulFast(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth) {
+	const int sharedSize = 32;
+	const int tileWidth = 32;
+	const int tileHeight = 64;
+	assert(tileWidth == 32); // tileWidth has to have warp size
+	assert(aWidth % 128 == 0); // row alligned with 512B block
+	assert(cWidth % 128 == 0); // row alligned with 512B block
+	dim3 blockSize(32, 4, 2);
+	dim3 accumSize(blockSize.y * tileWidth, blockSize.z * tileHeight);
+	assert(aWidth % sharedSize == 0);
+	assert(cWidth % accumSize.x == 0);
+	assert(cHeight % accumSize.y == 0);
+	dim3 gridSize(cWidth / accumSize.x, cHeight / accumSize.y);
+	matrixMulKernelFast<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
 }
 
 using KernelFunction = void(*)(float*, const float*, const float*, int, int, int);
@@ -335,6 +466,7 @@ void testMatrixMul() {
 	testMatrixMul(1024, 1024, 1024, matrixMulSTiled, "STiled");
 	testMatrixMul(1024, 1024, 1024, matrixMulSTTiled, "STTiled");
 	testMatrixMul(1024, 1024, 1024, matrixMulSWTiled, "SWTiled");
+	testMatrixMul(1024, 1024, 1024, matrixMulFast, "Fast");
 
 	checkCudaError(cudaGetLastError());
 	checkCudaError(cudaDeviceReset());
