@@ -23,7 +23,7 @@ void matrixMulNaive(float* c, const float* a, const float* b, int cWidth, int cH
 	matrixMulKernelNaive<<<gridSize, blockSize>>>(c, a, b, cWidth, cHeight, aWidth);
 }
 
-__global__ void matrixMulKernelTiled(float* c, const float* a, const float* b, int cWidth, int aWidth)
+__global__ void matrixMulKernelSTiled(float* c, const float* a, const float* b, int cWidth, int aWidth)
 {
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -50,7 +50,7 @@ __global__ void matrixMulKernelTiled(float* c, const float* a, const float* b, i
 	c[y * cWidth + x] = sum;
 }
 
-void matrixMulTiled(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth) {
+void matrixMulSTiled(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth) {
 	//checkCudaError(cudaFuncSetAttribute(matrixMulKernelTiled, cudaFuncAttributePreferredSharedMemoryCarveout, 50));
 	const int tileSize = 16;
 	assert(cWidth % tileSize == 0);
@@ -60,10 +60,10 @@ void matrixMulTiled(float* c, const float* a, const float* b, int cWidth, int cH
 	assert(cWidth % 128 == 0); // row alligned with 512B block
 	dim3 blockSize(tileSize, tileSize);
 	dim3 gridSize(cWidth / tileSize, cHeight / tileSize);
-	matrixMulKernelTiled<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
+	matrixMulKernelSTiled<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
 }
 
-__global__ void matrixMulKernelFast(float* c, const float* a, const float* b, int cWidth, int aWidth)
+__global__ void matrixMulKernelSTTiled(float* c, const float* a, const float* b, int cWidth, int aWidth)
 {
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -132,7 +132,7 @@ __global__ void matrixMulKernelFast(float* c, const float* a, const float* b, in
 	*((float4*)c) = row3;
 }
 
-void matrixMulFast(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth) {
+void matrixMulSTTiled(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth) {
 	const int tileSize = 4;
 	assert(cWidth % tileSize == 0);
 	assert(cHeight % tileSize == 0);
@@ -144,7 +144,97 @@ void matrixMulFast(float* c, const float* a, const float* b, int cWidth, int cHe
 	assert(cWidth % matPartSize.x == 0);
 	assert(cHeight % matPartSize.y == 0);
 	dim3 gridSize(cWidth / matPartSize.x, cHeight / matPartSize.y);
-	matrixMulKernelFast<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
+	matrixMulKernelSTTiled<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
+}
+
+template <int width, int height, int threadCount>
+__device__ void loadRect(float* dst, const float* src, int srcStride, int thread) {
+	assert(threadCount % (width / 4) == 0);
+	const int w = width / 4;
+	const int h = threadCount / w;
+	assert(threadCount % w == 0);
+
+	int ty = thread / w;
+	int tx = thread - (ty * w);
+	tx *= 4;
+	src += tx;
+	dst += tx;
+
+    #pragma unroll
+	for (int i = ty; i < height; i += h) {
+		reinterpret_cast<float4*>(dst)[i * w] = *reinterpret_cast<const float4*>(src + i * srcStride);
+	}
+}
+
+__global__ void matrixMulKernelSWTiled(float* c, const float* a, const float* b, int cWidth, int aWidth)
+{
+	const int sharedSize = 32;
+	const int tileWidth = 32;
+	const int tileHeight = 64;
+	const int gridWidth = 4;
+	const int gridHeight = 2;
+	assert(blockDim.x == tileWidth);
+	assert(blockDim.y == gridWidth && blockDim.z == gridHeight);
+	const int threadCount = tileWidth * gridWidth * gridHeight;
+
+	int warpThread = threadIdx.x;
+	int tileX = threadIdx.y;
+	int tileY = threadIdx.z;
+	int thread = (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;
+	int x = blockIdx.x * blockDim.y * tileWidth;
+	int y = blockIdx.y * blockDim.z * tileHeight;
+
+	__shared__ float aS[gridHeight * tileHeight * sharedSize];
+	__shared__ float bS[sharedSize * gridWidth * tileWidth];
+
+	float accum[tileHeight];
+	for (int i = 0; i < tileHeight; i++)
+		accum[i] = 0;
+
+	a += y * aWidth;
+	b += x;
+
+	for (int i = 0; i < aWidth; i += sharedSize) {
+		loadRect<sharedSize, gridHeight * tileHeight, threadCount>((float*)aS, a + i, aWidth, thread);
+		loadRect<gridWidth * tileWidth, sharedSize, threadCount>((float*)bS, b + i * cWidth, cWidth, thread);
+		__syncthreads();
+
+		float* a = aS + tileY * tileHeight * sharedSize;
+		float* b = bS + tileX * tileWidth + warpThread;
+        #pragma unroll
+		for (int k = 0; k < sharedSize; k++) {
+			float bValue = b[k * gridWidth * tileWidth];
+			#pragma unroll
+			for (int j = 0; j < tileHeight; j++) {
+				accum[j] += a[j * sharedSize + k] * bValue;
+			}
+		}
+		__syncthreads();
+	}
+
+	x += tileX * tileWidth;
+	y += tileY * tileHeight;
+	c += x + warpThread;
+	c += y * cWidth;
+	#pragma unroll
+	for (int i = 0; i < tileHeight; i++)
+		c[i * cWidth] = accum[i];
+}
+
+void matrixMulSWTiled(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth) {
+	const int sharedSize = 32;
+	const int tileWidth = 32;
+	const int tileHeight = 64;
+	assert(tileWidth == 32); // tileWidth has to have warp size
+	assert(aWidth % 128 == 0); // row alligned with 512B block
+	assert(cWidth % 128 == 0); // row alligned with 512B block
+	dim3 blockSize(32, 4, 2);
+	dim3 accumSize(blockSize.y * tileWidth, blockSize.z * tileHeight);
+	assert(aWidth % sharedSize == 0);
+	assert(cWidth % accumSize.x == 0);
+	assert(cHeight % accumSize.y == 0);
+	dim3 gridSize(cWidth / accumSize.x, cHeight / accumSize.y);
+	matrixMulKernelSWTiled<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
 }
 
 using KernelFunction = void(*)(float*, const float*, const float*, int, int, int);
@@ -210,8 +300,9 @@ void testMatrixMul() {
 	checkCudaError(cudaSetDevice(0));
 
 	testMatrixMul(1024, 1024, 1024, matrixMulNaive, "Naive");
-	testMatrixMul(1024, 1024, 1024, matrixMulTiled, "Tiled");
-	testMatrixMul(1024, 1024, 1024, matrixMulFast, "Fast");
+	testMatrixMul(1024, 1024, 1024, matrixMulSTiled, "STiled");
+	testMatrixMul(1024, 1024, 1024, matrixMulSTTiled, "STTiled");
+	testMatrixMul(1024, 1024, 1024, matrixMulSWTiled, "SWTiled");
 
 	checkCudaError(cudaGetLastError());
 	checkCudaError(cudaDeviceReset());
