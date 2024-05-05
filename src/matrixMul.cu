@@ -150,19 +150,23 @@ void matrixMulSTTiled(float* c, const float* a, const float* b, int cWidth, int 
 
 template <int width, int height, int threadCount>
 __device__ void loadRect(float* dst, const float* src, int srcStride, int thread) {
-	const int w = width / 4;
+	const int vecSize = sizeof(float4) / sizeof(float);
+	assert(width % vecSize == 0);
+	const int w = width / vecSize;
+	assert(width / vecSize <= threadCount);
 	const int h = threadCount / w;
 	assert(threadCount % w == 0);
 
 	int ty = thread / w;
 	int tx = thread - (ty * w);
-	tx *= 4;
+	tx *= vecSize;
 	src += tx;
 	dst += tx;
 
     #pragma unroll
 	for (int i = ty; i < height; i += h) {
-		reinterpret_cast<float4*>(dst)[i * w] = *reinterpret_cast<const float4*>(src + i * srcStride);
+		float4 vec = *reinterpret_cast<const float4*>(src + i * srcStride);
+		reinterpret_cast<float4*>(dst)[i * w] = vec;
 	}
 }
 
@@ -239,54 +243,76 @@ void matrixMulSWTiled(float* c, const float* a, const float* b, int cWidth, int 
 
 template <int width, int height, int threadCount>
 __device__ void loadRectT(float* dst, const float* src, int srcStride, int thread) {
-	const int w = width / 4;
-	const int h = threadCount / w;
-	assert(threadCount % w == 0);
+	const int vecSize = sizeof(float4) / sizeof(float);
+	assert(width % vecSize == 0);
+	if (threadCount == height * 2) {
+		int ty = thread >> 1;
+		int tx = thread - ty * 2;
+		const float4* srcRow = reinterpret_cast<const float4*>(src + ty * srcStride);
+		dst += ty;
 
-	int ty = thread / w;
-	int tx = thread - (ty * w);
-	src += tx * 4;
+		#pragma unroll
+		for (int x = tx; x < width / vecSize; x += 2) {
+			float4 vec = srcRow[x];
+			dst[(x * vecSize + 0) * height] = vec.x;
+			dst[(x * vecSize + 1) * height] = vec.y;
+			dst[(x * vecSize + 2) * height] = vec.z;
+			dst[(x * vecSize + 3) * height] = vec.w;
+		}
+	}
+	else {
+		assert(threadCount % 2 == 0);
+		const int threadBlockH = min(threadCount / 2, height);
+		assert(threadCount % threadBlockH == 0);
+		const int threadBlockW = threadCount / threadBlockH;
+		assert((width / vecSize) % threadBlockW == 0);
+		assert(height % threadBlockH == 0);
 
-    #pragma unroll
-	for (int i = ty; i < height; i += h) {
-		float4 v = *reinterpret_cast<const float4*>(src + i * srcStride);
-		dst[(tx * 4 + 0) * height + i] = v.x;
-		dst[(tx * 4 + 1) * height + i] = v.y;
-		dst[(tx * 4 + 2) * height + i] = v.z;
-		dst[(tx * 4 + 3) * height + i] = v.w;
+		int ty = thread / threadBlockW;
+		int tx = thread - (ty * threadBlockW);
+
+		#pragma unroll
+		for (int y = ty; y < height; y += threadBlockH) {
+			const float4* srcRow = reinterpret_cast<const float4*>(src + y * srcStride);
+			float* dstCol = dst + y;
+			#pragma unroll
+			for (int x = tx; x < width / vecSize; x += threadBlockW) {
+				float4 vec = srcRow[x];
+				dstCol[(x * vecSize + 0) * height] = vec.x;
+				dstCol[(x * vecSize + 1) * height] = vec.y;
+				dstCol[(x * vecSize + 2) * height] = vec.z;
+				dstCol[(x * vecSize + 3) * height] = vec.w;
+			}
+		}
 	}
 }
 
+template <int sharedSize, int tileWidth, int tileHeight, int gridWidth, int gridHeight>
 __global__ void matrixMulKernelFast(float* c, const float* a, const float* b, int cWidth, int aWidth)
 {
 	const int warpSize = 32;
-	const int sharedSize = 32;
-	const int tileWidth = 64;
-	const int tileHeight = 32;
-	const int gridWidth = 2;
-	const int gridHeight = 4;
-	assert(blockDim.x == warpSize);
-	assert(blockDim.y == gridWidth && blockDim.z == gridHeight);
-	const int threadCount = warpSize * gridWidth * gridHeight;
 	const int vecSize = sizeof(float4) / sizeof(float);
-
+	const int accumWidth = gridWidth * tileWidth;
+	const int accumHeight = gridHeight * tileHeight;
+	const int threadCount = warpSize * gridWidth * gridHeight;
 	const int warpWidth = tileWidth / vecSize / 2;
 	const int warpHeight = tileHeight / vecSize / 2;
+
+	assert(blockDim.x == warpSize);
+	assert(blockDim.y == gridWidth && blockDim.z == gridHeight);
 	assert(warpWidth * warpHeight == warpSize);
-	const int bStride = gridWidth * tileWidth / vecSize;
-	const int aStride = gridHeight * tileHeight / vecSize;
 
 	int warpThread = threadIdx.x;
 	int tileX = threadIdx.y;
 	int tileY = threadIdx.z;
-	int thread = (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;
 	int threadX = warpThread % warpWidth;
 	int threadY = warpThread / warpWidth;
+	int thread = (threadIdx.z * blockDim.y + threadIdx.y) * blockDim.x + threadIdx.x;
 	int x = blockIdx.x * blockDim.y * tileWidth;
 	int y = blockIdx.y * blockDim.z * tileHeight;
 
-	__shared__ float aS[sharedSize * gridHeight * tileHeight];
-	__shared__ float bS[sharedSize * gridWidth * tileWidth];
+	__shared__ float aS[sharedSize * accumHeight];
+	__shared__ float bS[sharedSize * accumWidth];
 
 	float4 accum00[vecSize];
 	float4 accum01[vecSize];
@@ -307,6 +333,8 @@ __global__ void matrixMulKernelFast(float* c, const float* a, const float* b, in
 
 		float4* b = reinterpret_cast<float4*>(bS + tileX * tileWidth) + threadX;
 		float4* a = reinterpret_cast<float4*>(aS + tileY * tileHeight) + threadY;
+		const int bStride = accumWidth / vecSize;
+		const int aStride = accumHeight / vecSize;
 
         #pragma unroll
 		for (int j = 0; j < sharedSize; j++) {
@@ -342,15 +370,8 @@ __global__ void matrixMulKernelFast(float* c, const float* a, const float* b, in
 
 	x += tileX * tileWidth + threadX * vecSize;
 	y += tileY * tileHeight + threadY * vecSize;
-	/*float4* out = reinterpret_cast<float4*>(c + y * cWidth + x);
-	int outStride = cWidth >> 2;
-	#pragma unroll
-	for (int i = 0; i < vecSize; i++) {
-		out[i * outStride] = accum00[i];
-		out[i * outStride + warpWidth] = accum01[i];
-		out[i * outStride + warpHeight * cWidth] = accum10[i];
-		out[i * outStride + warpHeight * cWidth + warpWidth] = accum11[i];
-	}*/
+#define STORE_OPT
+#ifdef STORE_OPT
 	c += y * cWidth + x;
     #pragma unroll
 	for (int i = 0; i < vecSize; i++) {
@@ -377,21 +398,36 @@ __global__ void matrixMulKernelFast(float* c, const float* a, const float* b, in
 		c[i * cWidth + vecSize * (warpHeight * cWidth + warpWidth) + 2] = accum11[i].z;
 		c[i * cWidth + vecSize * (warpHeight * cWidth + warpWidth) + 3] = accum11[i].w;
 	}
+#else
+	float4* out = reinterpret_cast<float4*>(c + y * cWidth + x);
+	int outStride = cWidth >> 2;
+	#pragma unroll
+	for (int i = 0; i < vecSize; i++) {
+		out[i * outStride] = accum00[i];
+		out[i * outStride + warpWidth] = accum01[i];
+		out[i * outStride + warpHeight * cWidth] = accum10[i];
+		out[i * outStride + warpHeight * cWidth + warpWidth] = accum11[i];
+	}
+#endif
 }
 
 void matrixMulFast(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth) {
+	assert(aWidth % 128 == 0); // row alligned with 512B block
+	assert(cWidth % 128 == 0); // row alligned with 512B block
+	const int warpSize = 32;
 	const int sharedSize = 32;
 	const int tileWidth = 64;
 	const int tileHeight = 32;
-	assert(aWidth % 128 == 0); // row alligned with 512B block
-	assert(cWidth % 128 == 0); // row alligned with 512B block
-	dim3 blockSize(32, 2, 4);
-	dim3 accumSize(blockSize.y * tileWidth, blockSize.z * tileHeight);
+	const int gridWidth = 2;
+	const int gridHeight = 2;
+	dim3 blockSize(warpSize, gridWidth, gridHeight);
+	dim3 accumSize(gridWidth * tileWidth, gridHeight * tileHeight);
 	assert(aWidth % sharedSize == 0);
 	assert(cWidth % accumSize.x == 0);
 	assert(cHeight % accumSize.y == 0);
 	dim3 gridSize(cWidth / accumSize.x, cHeight / accumSize.y);
-	matrixMulKernelFast<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
+	matrixMulKernelFast<sharedSize, tileWidth, tileHeight, gridWidth, gridHeight>
+		<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
 }
 
 using KernelFunction = void(*)(float*, const float*, const float*, int, int, int);
