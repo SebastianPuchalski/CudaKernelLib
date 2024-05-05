@@ -4,9 +4,9 @@
 #include "device_launch_parameters.h"
 
 __device__ __inline__ float gelu(float x) {
-	const float kA = 0.7978845608f; // sqrt(2 / PI)
-	const float kC = 0.044715f;
-	return 0.5f * x * (1.f + tanh(kA * (x + kC * x * x * x)));
+	const float A = 0.7978845608f; // sqrt(2 / PI)
+	const float C = 0.044715f;
+	return 0.5f * x * (1.f + tanh(A * (x + C * x * x * x)));
 }
 
 __global__ void gegluKernel(float* out, const float* in, int batchSize, int dim)
@@ -23,9 +23,9 @@ __global__ void gegluKernel(float* out, const float* in, int batchSize, int dim)
 }
 
 void geglu(float* out, const float* in, int batchSize, int dim) {
-	const int threadsPerBlock = 256;
-	int numberOfBlocks = ((batchSize * dim / 2) + threadsPerBlock - 1) / threadsPerBlock;
-	gegluKernel<<<numberOfBlocks, threadsPerBlock>>>(out, in, batchSize, dim);
+	const int THREAD_PER_BLOCK = 256;
+	int numberOfBlocks = ((batchSize * dim / 2) + THREAD_PER_BLOCK - 1) / THREAD_PER_BLOCK;
+	gegluKernel<<<numberOfBlocks, THREAD_PER_BLOCK >>>(out, in, batchSize, dim);
 }
 
 using KernelFunction = void(*)(float*, const float*, int, int);
@@ -50,8 +50,8 @@ float geglu(CudaBuffer<float>& outTensor, const CudaBuffer<float>& inTensor,
 }
 
 float geluRef(float x) {
-	const float kPI = 3.14159265359f;
-	return 0.5f * x * (1.f + tanh(sqrt(2.f / kPI) * (x + 0.044715f * pow(x, 3.f))));
+	const float PI = 3.14159265359f;
+	return 0.5f * x * (1.f + tanh(sqrt(2.f / PI) * (x + 0.044715f * pow(x, 3.f))));
 }
 
 void gegluRef(float* out, const float* in, int batchSize, int dim) {
