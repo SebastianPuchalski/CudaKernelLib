@@ -23,12 +23,12 @@ void matrixMulNaive(float* c, const float* a, const float* b, int cWidth, int cH
 	matrixMulKernelNaive<<<gridSize, blockSize>>>(c, a, b, cWidth, cHeight, aWidth);
 }
 
+template <int tileSize>
 __global__ void matrixMulKernelSTiled(float* c, const float* a, const float* b, int cWidth, int aWidth)
 {
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-	const int tileSize = 16;
 	assert(blockDim.x == tileSize && blockDim.y == tileSize);
 
 	__shared__ float aShared[tileSize][tileSize];
@@ -55,20 +55,17 @@ void matrixMulSTiled(float* c, const float* a, const float* b, int cWidth, int c
 	assert(cWidth % tileSize == 0);
 	assert(cHeight % tileSize == 0);
 	assert(aWidth % tileSize == 0);
-	assert(aWidth % 128 == 0); // row alligned with 512B block
-	assert(cWidth % 128 == 0); // row alligned with 512B block
 	dim3 blockSize(tileSize, tileSize);
 	dim3 gridSize(cWidth / tileSize, cHeight / tileSize);
-	matrixMulKernelSTiled<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
+	matrixMulKernelSTiled<tileSize><<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
 }
 
+template <int tileSize, int blockSize>
 __global__ void matrixMulKernelSTTiled(float* c, const float* a, const float* b, int cWidth, int aWidth)
 {
 	int x = blockIdx.x * blockDim.x + threadIdx.x;
 	int y = blockIdx.y * blockDim.y + threadIdx.y;
 
-	const int tileSize = 4;
-	const int blockSize = 16;
 	assert(blockDim.x == blockSize && blockDim.y == blockSize);
 
 	__shared__ float4 aShared[blockSize * tileSize * blockSize];
@@ -135,17 +132,16 @@ __global__ void matrixMulKernelSTTiled(float* c, const float* a, const float* b,
 
 void matrixMulSTTiled(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth) {
 	const int tileSize = 4;
+	const int bSize = 16;
 	assert(cWidth % tileSize == 0);
 	assert(cHeight % tileSize == 0);
 	assert(aWidth % tileSize == 0);
-	assert(aWidth % 128 == 0); // row alligned with 512B block
-	assert(cWidth % 128 == 0); // row alligned with 512B block
-	dim3 blockSize(16, 16);
+	dim3 blockSize(bSize, bSize);
 	dim3 matPartSize(blockSize.x * tileSize, blockSize.y * tileSize);
 	assert(cWidth % matPartSize.x == 0);
 	assert(cHeight % matPartSize.y == 0);
 	dim3 gridSize(cWidth / matPartSize.x, cHeight / matPartSize.y);
-	matrixMulKernelSTTiled<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
+	matrixMulKernelSTTiled<tileSize, bSize><<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
 }
 
 template <int width, int height, int threadCount>
@@ -170,13 +166,9 @@ __device__ void loadRect(float* dst, const float* src, int srcStride, int thread
 	}
 }
 
+template <int sharedSize, int tileWidth, int tileHeight, int gridWidth, int gridHeight>
 __global__ void matrixMulKernelSWTiled(float* c, const float* a, const float* b, int cWidth, int aWidth)
 {
-	const int sharedSize = 32;
-	const int tileWidth = 32;
-	const int tileHeight = 64;
-	const int gridWidth = 4;
-	const int gridHeight = 2;
 	assert(blockDim.x == tileWidth);
 	assert(blockDim.y == gridWidth && blockDim.z == gridHeight);
 	const int threadCount = tileWidth * gridWidth * gridHeight;
@@ -226,19 +218,20 @@ __global__ void matrixMulKernelSWTiled(float* c, const float* a, const float* b,
 }
 
 void matrixMulSWTiled(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth) {
+	const int warpSize = 32;
 	const int sharedSize = 32;
-	const int tileWidth = 32;
+	const int tileWidth = warpSize;
 	const int tileHeight = 64;
-	assert(tileWidth == 32); // tileWidth has to have warp size
-	assert(aWidth % 128 == 0); // row alligned with 512B block
-	assert(cWidth % 128 == 0); // row alligned with 512B block
-	dim3 blockSize(32, 4, 2);
+	const int gridWidth = 4;
+	const int gridHeight = 2;
+	dim3 blockSize(warpSize, gridWidth, gridHeight);
 	dim3 accumSize(blockSize.y * tileWidth, blockSize.z * tileHeight);
 	assert(aWidth % sharedSize == 0);
 	assert(cWidth % accumSize.x == 0);
 	assert(cHeight % accumSize.y == 0);
 	dim3 gridSize(cWidth / accumSize.x, cHeight / accumSize.y);
-	matrixMulKernelSWTiled<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
+	matrixMulKernelSWTiled<sharedSize, tileWidth, tileHeight, gridWidth, gridHeight>
+		<<<gridSize, blockSize>>>(c, a, b, cWidth, aWidth);
 }
 
 template <int width, int height, int threadCount>
@@ -412,8 +405,6 @@ __global__ void matrixMulKernelFast(float* c, const float* a, const float* b, in
 }
 
 void matrixMulFast(float* c, const float* a, const float* b, int cWidth, int cHeight, int aWidth) {
-	assert(aWidth % 128 == 0); // row alligned with 512B block
-	assert(cWidth % 128 == 0); // row alligned with 512B block
 	const int warpSize = 32;
 	const int sharedSize = 32;
 	const int tileWidth = 64;
@@ -434,6 +425,8 @@ using KernelFunction = void(*)(float*, const float*, const float*, int, int, int
 
 float matrixMul(CudaBuffer<float>& cHost, const CudaBuffer<float>& aHost, const CudaBuffer<float>& bHost,
 	            int cWidth, int cHeight, int aWidth, KernelFunction kernelFunc) {
+	assert(aWidth % 128 == 0); // row alligned with 512B block, TODO: use cudaMallocPitch
+	assert(cWidth % 128 == 0); // row alligned with 512B block, TODO: use cudaMallocPitch
 	CudaBuffer<float> cDev(cHost.size(), cudaMemoryTypeDevice);
 	CudaBuffer<float> aDev(aHost.size(), cudaMemoryTypeDevice);
 	CudaBuffer<float> bDev(bHost.size(), cudaMemoryTypeDevice);
