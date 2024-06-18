@@ -1,10 +1,12 @@
 #include "common.hpp"
+#include "softmax.cuh"
 #include "matrixMul.cuh"
 #include "geglu.cuh"
 
 #include <iostream>
 
 void test() {
+	testSoftmax();
 	testMatrixMul();
 	testGeGLU();
 }

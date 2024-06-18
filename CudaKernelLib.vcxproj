@@ -18,10 +18,16 @@
     <ClInclude Include="src\common.hpp" />
     <ClInclude Include="src\geglu.cuh" />
     <ClInclude Include="src\matrixMul.cuh" />
+    <ClInclude Include="src\softmax.cuh" />
   </ItemGroup>
   <ItemGroup>
     <CudaCompile Include="src\geglu.cu" />
-    <CudaCompile Include="src\matrixMul.cu" />
+    <CudaCompile Include="src\matrixMul.cu">
+      <CodeGeneration Condition="'$(Configuration)|$(Platform)'=='Release|x64'">compute_89,sm_89</CodeGeneration>
+      <InterleaveSourceInPTX Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</InterleaveSourceInPTX>
+      <NvccCompilation Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">compile</NvccCompilation>
+    </CudaCompile>
+    <CudaCompile Include="src\softmax.cu" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{BD5DCEBD-2869-445F-97C0-6A510D774CE8}</ProjectGuid>

@@ -16,12 +16,12 @@ void printDevicesProperties();
 
 template <typename T>
 class CudaBuffer {
-	int elNumber;
+	size_t elNumber;
 	cudaMemoryType memType;
 	T* data;
 
 public:
-	CudaBuffer(int size, cudaMemoryType type): elNumber(size), memType(type), data(nullptr) {
+	CudaBuffer(size_t size, cudaMemoryType type): elNumber(size), memType(type), data(nullptr) {
 		switch (type) {
 		case cudaMemoryTypeHost:
 			data = new T[size];
@@ -60,7 +60,7 @@ public:
 		assert(memType != cudaMemoryTypeDevice);
 		if (elNumber != rhs.elNumber)
 			return false;
-		for (int i = 0; i < elNumber; i++) {
+		for (size_t i = 0; i < elNumber; i++) {
 			if (data[i] != rhs.data[i])
 				return false;
 		}
@@ -71,7 +71,7 @@ public:
 		assert(memType != cudaMemoryTypeDevice);
 		if (elNumber != rhs.elNumber)
 			return false;
-		for (int i = 0; i < elNumber; i++) {
+		for (size_t i = 0; i < elNumber; i++) {
 			float a = data[i];
 			float b = rhs.data[i];
 			float diff = abs(a - b);
@@ -86,11 +86,11 @@ public:
 		return data;
 	}
 
-	int size() const {
+	size_t size() const {
 		return elNumber;
 	}
 
-	int dataSize() const {
+	size_t dataSize() const {
 		return elNumber * sizeof(T);
 	}
 
@@ -100,7 +100,7 @@ public:
 
 	void fillWithZeros() {
 		assert(memType != cudaMemoryTypeDevice);
-		for (int i = 0; i < elNumber; i++) {
+		for (size_t i = 0; i < elNumber; i++) {
 			data[i] = 0;
 		}
 	}
@@ -134,7 +134,7 @@ public:
 		static const unsigned seed = 3870562;
 		static std::mt19937 gen(seed);
 		std::uniform_real_distribution<float> dist(min, max);
-		for (int i = 0; i < elNumber; i++) {
+		for (size_t i = 0; i < elNumber; i++) {
 			data[i] = dist(gen);
 		}
 	}
