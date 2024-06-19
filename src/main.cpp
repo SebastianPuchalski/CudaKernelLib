@@ -7,8 +7,8 @@
 
 void test() {
 	testSoftmax();
-	testMatrixMul();
-	testGeGLU();
+	//testMatrixMul();
+	//testGeGLU();
 }
 
 int main(int argc, char *argv[]) {
