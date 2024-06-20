@@ -8,7 +8,7 @@
 
 const int BASE_DIM_NUMBER = 2;
 const int EXT_DIM_NUMBER = 4;
-const int MAX_DIM_NUMBER = 16; // it can be any number
+const int MAX_DIM_NUMBER = 64;
 __constant__ int addDimSizes[MAX_DIM_NUMBER - EXT_DIM_NUMBER];
 
 __inline__ __device__ int64_t calcAddOffset(int idxEven, int idxOdd, int dimNumber) {
@@ -29,10 +29,9 @@ __inline__ __device__ int64_t calcAddOffset(int idxEven, int idxOdd, int dimNumb
 }
 
 template <int MAX_DIM_NUM = MAX_DIM_NUMBER>
-__global__ void softmaxKernelM(float* out, const float* in, int size0, int size2, int sizeEven, int addDimNumber) {
+__global__ void softmaxKernelS(float* out, const float* in, int size0,
+	                           int size2, int sizeEven, int addDimNumber, float alpha = 1) {
 	const int WARP_SIZE = 32;
-	assert(WARP_SIZE == warpSize);
-	const int thread = threadIdx.x;
 
 	const int size1 = gridDim.x;
 	const int size3 = gridDim.y;
@@ -62,21 +61,21 @@ __global__ void softmaxKernelM(float* out, const float* in, int size0, int size2
 	out += offset13;
 
 	float max = FLT_MIN;
-	for (int idxEven = 0; idxEven < sizeEven; idxEven++) {
+	for (int idxEven = threadIdx.z; idxEven < sizeEven; idxEven += blockDim.z) {
 		float* lShared = shared;
 		const float* lIn = in;
 		if (addDimNumber) {
 			lShared += idxEven * stride02;
 			lIn += calcAddOffset(idxEven, idxOdd, addDimNumber) * stride0123;
 		}
-		for (int idx2 = 0; idx2 < size2; idx2++) {
-			for (int idx0 = thread; idx0 < size0; idx0 += WARP_SIZE) {
-				const float value = lIn[idx0];
-				lShared[idx0] = value;
+		for (int idx2 = threadIdx.y; idx2 < size2; idx2 += blockDim.y) {
+			float* llShared = lShared + idx2 * stride0;
+			const float* llIn = lIn + idx2 * stride01;
+			for (int idx0 = threadIdx.x; idx0 < size0; idx0 += blockDim.x) {
+				const float value = llIn[idx0];
+				llShared[idx0] = value;
 				max = fmaxf(value, max);
 			}
-			lIn += stride01;
-			lShared += stride0;
 		}
 	}
 	#pragma unroll
@@ -84,41 +83,40 @@ __global__ void softmaxKernelM(float* out, const float* in, int size0, int size2
 		max = fmaxf(max, __shfl_xor_sync(0xffffffff, max, i));
 
 	float sum = 0;
-	for (int idxEven = 0; idxEven < sizeEven; idxEven++) {
+	for (int idxEven = threadIdx.z; idxEven < sizeEven; idxEven += blockDim.z) {
 		float* lShared = shared + idxEven * stride02;
-		for (int idx2 = 0; idx2 < size2; idx2++) {
-			for (int idx0 = thread; idx0 < size0; idx0 += WARP_SIZE) {
-				const float value = expf(lShared[idx0] - max);
-				lShared[idx0] = value;
+		for (int idx2 = threadIdx.y; idx2 < size2; idx2 += blockDim.y) {
+			float* llShared = lShared + idx2 * stride0;
+			for (int idx0 = threadIdx.x; idx0 < size0; idx0 += blockDim.x) {
+				const float value = expf(llShared[idx0] - max);
+				llShared[idx0] = value;
 				sum += value;
 			}
-			lShared += stride0;
 		}
 	}
 	#pragma unroll
 	for (int i = WARP_SIZE / 2; i > 0; i >>= 1)
 		sum += __shfl_xor_sync(0xffffffff, sum, i);
 
-	const float invSum = 1.f / sum;
-	for (int idxEven = 0; idxEven < sizeEven; idxEven++) {
+	const float norm = alpha / sum;
+	for (int idxEven = threadIdx.z; idxEven < sizeEven; idxEven += blockDim.z) {
 		float* lShared = shared;
 		float* lOut = out;
 		if (addDimNumber) {
 			lShared += idxEven * stride02;
 			lOut += calcAddOffset(idxEven, idxOdd, addDimNumber) * stride0123;
 		}
-		for (int idx2 = 0; idx2 < size2; idx2++) {
-			for (int idx0 = thread; idx0 < size0; idx0 += WARP_SIZE)
-				lOut[idx0] = lShared[idx0] * invSum;
-			lOut += stride01;
-			lShared += stride0;
+		for (int idx2 = threadIdx.y; idx2 < size2; idx2 += blockDim.y) {
+			float* llShared = lShared + idx2 * stride0;
+			float* llOut = lOut + idx2 * stride01;
+			for (int idx0 = threadIdx.x; idx0 < size0; idx0 += blockDim.x)
+				llOut[idx0] = llShared[idx0] * norm;
 		}
 	}
 }
 
-__global__ void softmaxKernelM(float* out, const float* in, int size0) {
+__global__ void softmaxKernelS(float* out, const float* in, int size0, float alpha = 1) {
 	const int WARP_SIZE = 32;
-	assert(WARP_SIZE == warpSize);
 	const int thread = threadIdx.x;
 
 	extern __shared__ float shared[];
@@ -147,117 +145,51 @@ __global__ void softmaxKernelM(float* out, const float* in, int size0) {
 	for (int i = WARP_SIZE / 2; i > 0; i >>= 1)
 		sum += __shfl_xor_sync(0xffffffff, sum, i);
 
-	const float invSum = 1.f / sum;
+	const float norm = alpha / sum;
 	for (int i = thread; i < size0; i += WARP_SIZE)
-		out[i] = shared[i] * invSum;
+		out[i] = shared[i] * norm;
 }
 
-template <int BLOCK_SIZE>
-__inline__ __device__ void reduceMaxSumInBlock(float& max, float& sum, int thread) {
-	assert(BLOCK_SIZE % 2 == 0);
-	const int WARP_SIZE = 32;
-
-	__shared__ float maxMem[BLOCK_SIZE];
-	__shared__ float sumMem[BLOCK_SIZE];
-	maxMem[thread] = max;
-	sumMem[thread] = sum;
-	__syncthreads();
-
-	#pragma unroll
-	for (int i = BLOCK_SIZE / 2; i >= WARP_SIZE; i >>= 1) {
-		assert(i % 2 == 0);
-		if (thread < i) {
-			const float max1 = maxMem[thread];
-			const float max2 = maxMem[thread + i];
-			float sum1 = sumMem[thread];
-			float sum2 = sumMem[thread + i];
-			const float newMax = fmaxf(max1, max2);
-			sum1 *= __expf(max1 - newMax);
-			sum2 *= __expf(max2 - newMax);
-			maxMem[thread] = newMax;
-			sumMem[thread] = sum1 + sum2;
-		}
-		__syncthreads();
-	}
-
-	if (thread < WARP_SIZE) {
-		float max = maxMem[thread];
-		float sum = sumMem[thread];
-
-		float newMax = max;
-		#pragma unroll
-		for (int i = WARP_SIZE / 2; i > 0; i >>= 1)
-			newMax = fmaxf(newMax, __shfl_xor_sync(0xffffffff, newMax, i));
-		maxMem[thread] = newMax;
-
-		sum *= __expf(max - newMax);
-		for (int i = WARP_SIZE / 2; i > 0; i >>= 1)
-			sum += __shfl_xor_sync(0xffffffff, sum, i);
-		sumMem[thread] = sum;
-	}
-	__syncthreads();
-	max = *maxMem;
-	sum = *sumMem;
+int roundDownToPowerOfTwo(int number) {
+	if (number <= 0) return 0;
+	number |= number >> 1;
+	number |= number >> 2;
+	number |= number >> 4;
+	number |= number >> 8;
+	number |= number >> 16;
+	return (number >> 1) + 1;
 }
 
-template <int BLOCK_SIZE>
-__global__ void softmaxKernelL(float* out, const float* in, int size0) {
-	const int WARP_SIZE = 32;
-	assert(WARP_SIZE == warpSize);
-	const int thread = threadIdx.x;
-
-	const int64_t offset1 = blockIdx.x * size0;
-	in += offset1;
-	out += offset1;
-
-	float max = in[thread];
-	float sum = 1;
-	for (int i = thread + BLOCK_SIZE; i < size0; i += BLOCK_SIZE) {
-		const float value = in[i];
-		const float newMax = fmaxf(max, value);
-		const float fraction = __expf(fminf(max, value) - newMax);
-		sum = (value > max) ? sum * fraction + 1 : sum + fraction;
-		/*sum *= expf(max - newMax);
-		sum += expf(value - newMax);*/
-		max = newMax;
-	}
-
-	reduceMaxSumInBlock<BLOCK_SIZE>(max, sum, thread);
-
-	const float invSum = 1.f / sum;
-	for (int i = thread; i < size0; i += BLOCK_SIZE)
-		out[i] = __expf(in[i] - max) * invSum;
+dim3 calcBlockDim(int blockSize, int size0, int size2, int sizeEven) {
+	dim3 blockDim;
+	blockDim.x = (size0 < 32) ? 8 : 32;
+	if (size0 % 8 == 0) blockDim.x = 8;
+	if (size0 % 16 == 0) blockDim.x = 16;
+	if (size0 % 32 == 0) blockDim.x = 32;
+	blockSize /= blockDim.x;
+	blockDim.z = std::min(roundDownToPowerOfTwo(sizeEven), blockSize);
+	blockSize /= blockDim.z;
+	blockDim.y = std::min(roundDownToPowerOfTwo(size2), blockSize);
+	blockSize /= blockDim.y;
+	blockDim.x *= blockSize;
+	return blockDim;
 }
 
-bool softmaxL(float* out, const float* in, std::vector<int> dimensions) {
-	const int WARP_SIZE = 32;
-	const int BLOCK_SIZE = 1024;
-
-	assert(!dimensions.empty());
-	int size0 = dimensions[0];
-	int size1 = dimensions.size() > 1 ? dimensions[1] : 1;
-	if (dimensions.size() <= BASE_DIM_NUMBER) {
-		dim3 blockSize(BLOCK_SIZE);
-		dim3 gridSize(size1);
-		softmaxKernelL<BLOCK_SIZE><<<gridSize, blockSize>>>(out, in, size0);
-		return true;
-	}
-}
-
-void softmaxM(float* out, const float* in, std::vector<int> dimensions) {
+void softmaxS(float* out, const float* in, std::vector<int> dimensions) {
 	const int WARP_SIZE = 32;
 
 	assert(!dimensions.empty());
 	int size0 = dimensions[0];
 	assert(size0 > 1);
 	int size1 = dimensions.size() > 1 ? dimensions[1] : 1;
-	/*if (dimensions.size() <= BASE_DIM_NUMBER) {
+	if (dimensions.size() <= BASE_DIM_NUMBER) {
 		dim3 blockSize(WARP_SIZE);
 		dim3 gridSize(size1);
 		int sharedSize = size0 * sizeof(float);
 		assert(sharedSize < 48 * 1024);
-		softmaxKernel<<<gridSize, blockSize, sharedSize>>>(out, in, size0);
-	}*/
+		softmaxKernelS<<<gridSize, blockSize, sharedSize>>>(out, in, size0);
+		return;
+	}
 	int size2 = dimensions.size() > 2 ? dimensions[2] : 1;
 	int size3 = dimensions.size() > 3 ? dimensions[3] : 1;
 	int addDimNum = 0;
@@ -276,117 +208,268 @@ void softmaxM(float* out, const float* in, std::vector<int> dimensions) {
 				sizeOdd *= dimensions[i];
 		}
 	}
-	dim3 blockSize(WARP_SIZE);
 	assert(sizeOdd < 65536);
-	dim3 gridSize(size1, size3, sizeOdd);
+	dim3 gridDim(size1, size3, sizeOdd);
 	int sharedSize = size0 * size2 * sizeEven * sizeof(float);
-	assert(sharedSize < 48 * 1024);
+
 	if(addDimNum) {
-		softmaxKernelM<<<gridSize, blockSize, sharedSize>>>(out, in, size0, size2, sizeEven, addDimNum);
+		dim3 blockDim = calcBlockDim(WARP_SIZE, size0, size2, sizeEven);
+		softmaxKernelS<<<gridDim, blockDim, sharedSize>>>
+			(out, in, size0, size2, sizeEven, addDimNum);
 	}
 	else {
 		if (size2 > 1 || size3 > 1) {
-			softmaxKernelM<EXT_DIM_NUMBER><<<gridSize, blockSize, sharedSize>>>(out, in, size0, size2, sizeEven, addDimNum);
+			dim3 blockDim = calcBlockDim(WARP_SIZE, size0, size2, sizeEven);
+			softmaxKernelS<EXT_DIM_NUMBER><<<gridDim, blockDim, sharedSize>>>
+				(out, in, size0, size2, sizeEven, addDimNum);
 		}
 		else {
-			softmaxKernelM<BASE_DIM_NUMBER><<<gridSize, blockSize, sharedSize>>>(out, in, size0, size2, sizeEven, addDimNum);
+			dim3 blockDim(WARP_SIZE);
+			softmaxKernelS<BASE_DIM_NUMBER><<<gridDim, blockDim, sharedSize>>>
+				(out, in, size0, size2, sizeEven, addDimNum);
 		}
 	}
 }
 
-//-----------------------------------------------------------------------------
+template <int BLOCK_SIZE>
+__inline__ __device__ void reduceMaxSumInBlock(float& max, float& sum, int thread) {
+	assert(BLOCK_SIZE % 2 == 0);
+	const int WARP_SIZE = 32;
 
-//const int WIDTH = 1024;
-//
-//__inline__ __device__ float reduceMax(float value, int thread) {
-//	const int WARP_SIZE = 32;
-//	__shared__ float reduceMem[WIDTH];
-//	reduceMem[thread] = value;
-//	__syncthreads();
-//
-//#pragma unroll
-//	for (int i = WIDTH / 2; i >= WARP_SIZE; i >>= 1) {
-//		if (thread < i)
-//			reduceMem[thread] = fmaxf(reduceMem[thread], reduceMem[thread + i]);
-//		__syncthreads();
-//	}
-//
-//	if (thread < WARP_SIZE) {
-//		float max = reduceMem[thread];
-//#pragma unroll
-//		for (int i = WARP_SIZE / 2; i > 0; i >>= 1)
-//			max = fmaxf(max, __shfl_xor_sync(0xffffffff, max, i));
-//		reduceMem[thread] = max;
-//	}
-//	__syncthreads();
-//
-//	return reduceMem[0];
-//}
-//
-//__inline__ __device__ float reduceSum(float value, int thread) {
-//	const int WARP_SIZE = 32;
-//	__shared__ float reduceMem[WIDTH];
-//	reduceMem[thread] = value;
-//	__syncthreads();
-//
-//#pragma unroll
-//	for (int i = WIDTH / 2; i >= WARP_SIZE; i >>= 1) {
-//		if (thread < i)
-//			reduceMem[thread] = reduceMem[thread] + reduceMem[thread + i];
-//		__syncthreads();
-//	}
-//
-//	if (thread < WARP_SIZE) {
-//		float sum = reduceMem[thread];
-//#pragma unroll
-//		for (int i = WARP_SIZE / 2; i > 0; i >>= 1)
-//			sum += __shfl_xor_sync(0xffffffff, sum, i);
-//		reduceMem[thread] = sum;
-//	}
-//	__syncthreads();
-//
-//	return reduceMem[0];
-//}
-//
-//__global__ void softmaxTestKernel(float* out, const float* in, int size0) {
-//	const int WARP_SIZE = 32;
-//	assert(WARP_SIZE == warpSize);
-//	const int thread = threadIdx.x;
-//
-//	const int64_t offset1 = blockIdx.x * size0;
-//	in += offset1;
-//	out += offset1;
-//
-//	float max = FLT_MIN;
-//	for (int i = thread; i < size0; i += WIDTH)
-//		max = fmaxf(in[i], max);
-//	max = reduceMax(max, thread);
-//
-//	float sum = 0;
-//	for (int i = thread; i < size0; i += WIDTH)
-//		sum += expf(in[i] - max);
-//	sum = reduceSum(sum, thread);
-//
-//	sum = 1.f / sum;
-//	for (int i = thread; i < size0; i += WIDTH)
-//		out[i] = expf(in[i] - max) * sum;
-//}
-//
-//bool softmaxTest(float* out, const float* in, std::vector<int> dimensions) {
-//	const int WARP_SIZE = 32;
-//
-//	assert(!dimensions.empty());
-//	int size0 = dimensions[0];
-//	int size1 = dimensions.size() > 1 ? dimensions[1] : 1;
-//	if (dimensions.size() <= BASE_DIM_NUMBER) {
-//		dim3 blockSize(WIDTH);
-//		dim3 gridSize(size1);
-//		softmaxTestKernel << <gridSize, blockSize >> > (out, in, size0);
-//		return true;
-//	}
-//} // 256: 53%. 512: 47%
+	__shared__ float maxMem[BLOCK_SIZE];
+	__shared__ float sumMem[BLOCK_SIZE];
 
-//-----------------------------------------------------------------------------
+	if (BLOCK_SIZE > WARP_SIZE) {
+		maxMem[thread] = max;
+		sumMem[thread] = sum;
+		__syncthreads();
+
+		#pragma unroll
+		for (int i = BLOCK_SIZE / 2; i >= WARP_SIZE; i >>= 1) {
+			assert(i % 2 == 0);
+			if (thread < i) {
+				const float max1 = maxMem[thread];
+				const float max2 = maxMem[thread + i];
+				float sum1 = sumMem[thread];
+				float sum2 = sumMem[thread + i];
+				const float newMax = fmaxf(max1, max2);
+				sum1 *= expf(max1 - newMax);
+				sum2 *= expf(max2 - newMax);
+				maxMem[thread] = newMax;
+				sumMem[thread] = sum1 + sum2;
+			}
+			__syncthreads();
+		}
+
+		if (thread < WARP_SIZE) {
+			max = maxMem[thread];
+			sum = sumMem[thread];
+		}
+	}
+
+	if (thread < WARP_SIZE) {
+		float newMax = max;
+		#pragma unroll
+		for (int i = WARP_SIZE / 2; i > 0; i >>= 1)
+			newMax = fmaxf(newMax, __shfl_xor_sync(0xffffffff, newMax, i));
+		maxMem[thread] = newMax;
+
+		sum *= expf(max - newMax);
+		for (int i = WARP_SIZE / 2; i > 0; i >>= 1)
+			sum += __shfl_xor_sync(0xffffffff, sum, i);
+		sumMem[thread] = sum;
+	}
+	__syncthreads();
+	max = *maxMem;
+	sum = *sumMem;
+}
+
+template <int BLOCK_SIZE, int MAX_DIM_NUM = MAX_DIM_NUMBER>
+__global__ void softmaxKernel(float* out, const float* in, int size0,
+	                          int size2, int sizeEven, int addDimNumber, float alpha = 1) {
+	const int WARP_SIZE = 32;
+
+	const int size1 = gridDim.x;
+	const int size3 = gridDim.y;
+	const int sizeOdd = gridDim.x;
+	const int idx1 = blockIdx.x;
+	const int idx3 = blockIdx.y;
+	const int idxOdd = blockIdx.z;
+
+	const int stride0 = size0;
+	const int stride01 = stride0 * size1;
+	const int stride02 = stride0 * size2;
+	const int stride012 = stride01 * size2;
+	const int stride0123 = stride012 * size3;
+
+	if (MAX_DIM_NUM <= EXT_DIM_NUMBER) {
+		sizeEven = 1;
+		addDimNumber = 0;
+	}
+	if (MAX_DIM_NUM <= BASE_DIM_NUMBER) {
+		size2 = 1;
+	}
+
+	const int64_t offset13 = idx1 * stride0 + idx3 * stride012;
+	in += offset13;
+	out += offset13;
+
+	float max = FLT_MIN;
+	float sum = 0;
+
+	for (int idxEven = threadIdx.z; idxEven < sizeEven; idxEven += blockDim.z) {
+		const float* lIn = in;
+		if (addDimNumber)
+			lIn += calcAddOffset(idxEven, idxOdd, addDimNumber) * stride0123;
+		for (int idx2 = threadIdx.y; idx2 < size2; idx2 += blockDim.y) {
+			const float* llIn = lIn + idx2 * stride01;
+			for (int idx0 = threadIdx.x; idx0 < size0; idx0 += blockDim.x) {
+				const float value = llIn[idx0];
+				const float newMax = fmaxf(max, value);
+				const float fraction = expf(fminf(max, value) - newMax);
+				sum = (value > max) ? sum * fraction + 1 : sum + fraction;
+				max = newMax;
+			}
+		}
+	}
+
+	const int thread = threadIdx.x + (threadIdx.y + threadIdx.z * blockDim.y) * blockDim.x;
+	reduceMaxSumInBlock<BLOCK_SIZE>(max, sum, thread);
+
+	const float norm = alpha / sum;
+	for (int idxEven = threadIdx.z; idxEven < sizeEven; idxEven += blockDim.z) {
+		const float* lIn = in;
+		float* lOut = out;
+		if (addDimNumber) {
+			const int64_t addOffset = calcAddOffset(idxEven, idxOdd, addDimNumber) * stride0123;
+			lOut += addOffset;
+			lIn += addOffset;
+		}
+		for (int idx2 = threadIdx.y; idx2 < size2; idx2 += blockDim.y) {
+			const int offset2 = idx2 * stride01;
+			const float* llIn = lIn + offset2;
+			float* llOut = lOut + offset2;
+			for (int idx0 = threadIdx.x; idx0 < size0; idx0 += blockDim.x)
+				llOut[idx0] = expf(llIn[idx0] - max) * norm;
+		}
+	}
+}
+
+template <int BLOCK_SIZE>
+__global__ void softmaxKernel(float* out, const float* in, int size0, float alpha = 1) {
+	const int WARP_SIZE = 32;
+	assert(WARP_SIZE == warpSize);
+	const int thread = threadIdx.x;
+
+	const int64_t offset1 = blockIdx.x * size0;
+	in += offset1;
+	out += offset1;
+
+	float max = FLT_MIN;
+	float sum = 0;
+	if (thread < size0) {
+		max = in[thread];
+		sum = 1;
+	}
+	for (int i = thread + BLOCK_SIZE; i < size0; i += BLOCK_SIZE) {
+		const float value = in[i];
+		const float newMax = fmaxf(max, value);
+		const float fraction = expf(fminf(max, value) - newMax);
+		sum = (value > max) ? sum * fraction + 1 : sum + fraction;
+		max = newMax;
+	}
+
+	reduceMaxSumInBlock<BLOCK_SIZE>(max, sum, thread);
+
+	const float norm = alpha / sum;
+	for (int i = thread; i < size0; i += BLOCK_SIZE)
+		out[i] = expf(in[i] - max) * norm;
+}
+
+void softmax(float* out, const float* in, std::vector<int> dimensions) {
+	const int OP_SIZE_THRESHOLD = 4 * 1024;
+
+	assert(!dimensions.empty());
+	int size0 = dimensions[0];
+	assert(size0 > 1);
+	int size1 = dimensions.size() > 1 ? dimensions[1] : 1;
+	if (dimensions.size() <= BASE_DIM_NUMBER) {
+		dim3 gridDim(size1);
+		if(size0 >= OP_SIZE_THRESHOLD) {
+			const int BLOCK_SIZE = 1024;
+			dim3 blockDim(BLOCK_SIZE);
+			softmaxKernel<BLOCK_SIZE><<<gridDim, blockDim>>>(out, in, size0);
+		}
+		else {
+			const int BLOCK_SIZE = 32;
+			dim3 blockDim(BLOCK_SIZE);
+			softmaxKernel<BLOCK_SIZE><<<gridDim, blockDim>>>(out, in, size0);
+		}
+		return;
+	}
+	int size2 = dimensions.size() > 2 ? dimensions[2] : 1;
+	int size3 = dimensions.size() > 3 ? dimensions[3] : 1;
+	int addDimNum = 0;
+	int sizeEven = 1;
+	int sizeOdd = 1;
+	if (dimensions.size() > EXT_DIM_NUMBER) {
+		dimensions.erase(dimensions.begin(), dimensions.begin() + EXT_DIM_NUMBER);
+		addDimNum = dimensions.size();
+		assert(addDimNum + EXT_DIM_NUMBER <= MAX_DIM_NUMBER);
+		cudaMemcpyToSymbol(addDimSizes, dimensions.data(), dimensions.size() * sizeof(int));
+		checkCudaError(cudaGetLastError());
+		for (int i = 0; i < dimensions.size(); i++) {
+			assert(dimensions[i] > 1);
+			if (i % 2 == 0)
+				sizeEven *= dimensions[i];
+			else
+				sizeOdd *= dimensions[i];
+		}
+	}
+	assert(sizeOdd < 65536);
+	dim3 gridDim(size1, size3, sizeOdd);
+
+	if (size0 * size2 * sizeEven >= OP_SIZE_THRESHOLD) {
+		const int BLOCK_SIZE = 1024;
+		if(addDimNum) {
+			dim3 blockDim = calcBlockDim(BLOCK_SIZE, size0, size2, sizeEven);
+			softmaxKernel<BLOCK_SIZE><<<gridDim, blockDim>>>
+				(out, in, size0, size2, sizeEven, addDimNum);
+		}
+		else {
+			if (size2 > 1 || size3 > 1) {
+				dim3 blockDim = calcBlockDim(BLOCK_SIZE, size0, size2, sizeEven);
+				softmaxKernel<BLOCK_SIZE, EXT_DIM_NUMBER><<<gridDim, blockDim>>>
+					(out, in, size0, size2, sizeEven, addDimNum);
+			}
+			else {
+				dim3 blockDim(BLOCK_SIZE);
+				softmaxKernel<BLOCK_SIZE, BASE_DIM_NUMBER><<<gridDim, blockDim>>>
+					(out, in, size0, size2, sizeEven, addDimNum);
+			}
+		}
+	}
+	else {
+		const int BLOCK_SIZE = 32;
+		if(addDimNum) {
+			dim3 blockDim = calcBlockDim(BLOCK_SIZE, size0, size2, sizeEven);
+			softmaxKernel<BLOCK_SIZE><<<gridDim, blockDim>>>
+				(out, in, size0, size2, sizeEven, addDimNum);
+		}
+		else {
+			if (size2 > 1 || size3 > 1) {
+				dim3 blockDim = calcBlockDim(BLOCK_SIZE, size0, size2, sizeEven);
+				softmaxKernel<BLOCK_SIZE, EXT_DIM_NUMBER><<<gridDim, blockDim>>>
+					(out, in, size0, size2, sizeEven, addDimNum);
+			}
+			else {
+				dim3 blockDim(BLOCK_SIZE);
+				softmaxKernel<BLOCK_SIZE, BASE_DIM_NUMBER><<<gridDim, blockDim>>>
+					(out, in, size0, size2, sizeEven, addDimNum);
+			}
+		}
+	}
+}
 
 void flattenTensor(std::vector<int>& dimensions, std::vector<bool>& mask) {
 	assert(dimensions.size() == mask.size() && !dimensions.empty());
@@ -413,31 +496,12 @@ void softmax(float* out, const float* in,
 	assert(dimensions.size() == mask.size() && !dimensions.empty());
 	flattenTensor(dimensions, mask);
 	if (mask.front()) {
-		softmaxL(out, in, dimensions);
+		softmax(out, in, dimensions);
 	}
 	else {
 		assert(!"Unsupported yet");
 	}
 }
-
-//__global__ void softmaxKernel(float* out, const float* in)
-//{
-//	int id = blockIdx.x * blockDim.x + threadIdx.x;
-//	out[id] = expf(in[id]) + expf(in[id] * 2) + expf(in[id] * 0.534);
-//}
-//
-//void softmax(float* out, const float* in, const std::vector<int>& dimensions, bool opOnLeastSigDim) {
-//	//temporary assumptions:
-//	assert(opOnLeastSigDim == true);
-//	assert(dimensions.size() == 2);
-//
-//	int height = dimensions[1];
-//	int width = dimensions[0]; // least significant dimmension
-//
-//	dim3 blockSize(width);
-//	dim3 gridSize(height);
-//	softmaxKernel<<<gridSize, blockSize>>>(out, in);
-//}
 
 float softmax(CudaBuffer<float>& outHost, const CudaBuffer<float>& inHost,
 	          const std::vector<int> dimensions, const std::vector<bool> mask) {
@@ -467,7 +531,7 @@ float softmaxMemCopy(CudaBuffer<float>& outHost, const CudaBuffer<float>& inHost
 
 	CudaEvent start, stop;
 	start.record();
-	outDev.copyFrom(inDev); // kernel replaced with memCopy
+	outDev.copyFrom(inDev); // kernel replaced with cudaMemcpy
 	checkCudaError(cudaGetLastError());
 	stop.record();
 	stop.synchronize();
@@ -479,7 +543,8 @@ float softmaxMemCopy(CudaBuffer<float>& outHost, const CudaBuffer<float>& inHost
 	return elapsedTime;
 }
 
-size_t convIndex(size_t index, const std::vector<int>& dimensions, const std::vector<bool>& mask) {
+size_t convIndex(size_t index, const std::vector<int>& dimensions,
+	                           const std::vector<bool>& mask) {
 	size_t newIndex = 0;
 	size_t stride = 1;
 	for (int i = 0; i < dimensions.size(); i++) {
@@ -549,7 +614,8 @@ double getTheoreticalTime(const std::vector<int>& dimensions) {
 	return tensorAccessInSec * 2 * 1000; // in milliseconds
 }
 
-void testSoftmax(const std::vector<int>& dimensions, const std::vector<bool>& mask) {
+void testSoftmax(const std::vector<int>& dimensions,
+	             const std::vector<bool>& mask) {
 	if (dimensions.size() != mask.size() || mask.size() == 0)
 		return;
 
@@ -558,7 +624,7 @@ void testSoftmax(const std::vector<int>& dimensions, const std::vector<bool>& ma
 		size *= d;
 
 	CudaBuffer<float> in(size, cudaMemoryTypeHost);
-	in.fillWithRandom(-1000, 1000);
+	in.fillWithRandom(-100, 100);
 
 	CudaBuffer<float> out(size, cudaMemoryTypeHost);
 	float timeMemCopy = softmaxMemCopy(out, in, dimensions, mask);
@@ -586,22 +652,41 @@ void testSoftmax(const std::vector<int>& dimensions, const std::vector<bool>& ma
 	name += ss.str();
 
 	printTestItem(name, time, pass);
+	checkCudaError(cudaDeviceReset());
 }
 
 void testSoftmax() {
 	checkCudaError(cudaSetDevice(0));
 
-	for (int i = 1; i <= 12; i++) {
-		int size = 1 << i; // 2^i
-		testSoftmax({ 1024 * 64, 8, 4, size, 2 }, { 1, 0, 0, 0, 0 });
-	}
+	testSoftmax({ 32, 1024, 512 }, { 1, 0, 0 });
+	testSoftmax({ 53, 1001, 1037 }, { 1, 0, 0 });
+	testSoftmax({ 64, 1024, 1024 }, { 1, 0, 0 });
+	testSoftmax({ 128, 1031, 250 }, { 1, 0, 0 });
+	testSoftmax({ 256, 1024, 128 }, { 1, 0, 0 });
+	testSoftmax({ 417, 1111, 55 }, { 1, 0, 0 });
+	testSoftmax({ 1024, 1024, 32 }, { 1, 0, 0 });
 
-	//checkCudaError(cudaSetDevice(0));
+	testSoftmax({ 1024, 2, 1024, 64 }, { 1, 1, 0, 0 });
+	testSoftmax({ 1024, 4, 1024, 32 }, { 1, 1, 0, 0 });
+	testSoftmax({ 1024, 8, 1024, 16 }, { 1, 1, 0, 0 });
+	testSoftmax({ 999, 15, 1123, 8 }, { 1, 1, 0, 0 });
+	testSoftmax({ 1024, 32, 1024, 4 }, { 1, 1, 0, 0 });
+	testSoftmax({ 1024, 64, 1024, 2 }, { 1, 1, 0, 0 });
+	testSoftmax({ 1024, 128, 512, 2 }, { 1, 1, 0, 0 });
 
-	//for (int i = 1; i <= 12; i++) {
-	//	int size = 1 << i; // 2^i
-	//	testSoftmax({ 125, 64, 8, size, 2 }, { 1, 0, 1, 0, 1 });
-	//}
+	testSoftmax({ 14, 256, 32, 512 }, { 1, 0, 1, 0 });
+	testSoftmax({ 16, 256, 16, 512 }, { 1, 0, 1, 0 });
+	testSoftmax({ 64, 256, 4, 512 }, { 1, 0, 1, 0 });
+	testSoftmax({ 256, 256, 2, 256 }, { 1, 0, 1, 0 });
+	testSoftmax({ 1024, 256, 2, 32 }, { 1, 0, 1, 0 });
+	testSoftmax({ 4096, 64, 2, 32 }, { 1, 0, 1, 0 });
+	testSoftmax({ 4096, 16, 16, 16 }, { 1, 0, 1, 0 });
+
+	testSoftmax({ 244, 16, 4, 16, 4, 16 }, { 1, 0, 1, 0, 1, 0 });
+	testSoftmax({ 256, 16, 16, 16, 4, 8 }, { 1, 0, 1, 0, 1, 0 });
+	testSoftmax({ 256, 16, 64, 16, 4, 2 }, { 1, 0, 1, 0, 1, 0 });
+
+	testSoftmax({ 4, 4, 16, 8, 2, 8, 2, 2, 2, 2, 2, 4, 2, 2, 2 }, { 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0 });
 
 	checkCudaError(cudaGetLastError());
 	checkCudaError(cudaDeviceReset());
