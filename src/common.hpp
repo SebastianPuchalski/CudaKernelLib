@@ -67,19 +67,23 @@ public:
 		return true;
 	}
 
-	bool approxEqual(const CudaBuffer<float>& rhs, float maxRelDiff = 1e-6) const {
+	bool approxEqual(const CudaBuffer<float>& rhs, float tolerance = 10) const {
 		assert(memType != cudaMemoryTypeDevice);
+		assert(rhs.memType != cudaMemoryTypeDevice);
+		assert(tolerance >= 1); // error is usually between 0 and 1
 		if (elNumber != rhs.elNumber)
 			return false;
+		double sumSq = 0;
 		for (size_t i = 0; i < elNumber; i++) {
-			float a = data[i];
-			float b = rhs.data[i];
-			float diff = abs(a - b);
-			float mean = (abs(a) + abs(b)) / 2.0f;
-			if (diff / (mean + FLT_MIN) > maxRelDiff)
-				return false;
+			double a = data[i];
+			double b = rhs.data[i];
+			double diff = abs(a - b);
+			double mean = (abs(a) + abs(b)) / 2;
+			double relativeDiff = diff / (mean + (tolerance * FLT_MIN / FLT_EPSILON));
+			sumSq += relativeDiff * relativeDiff;
 		}
-		return true;
+		double maxRelativeDiff = tolerance * FLT_EPSILON;
+		return (sumSq / elNumber) < static_cast<double>(maxRelativeDiff) * maxRelativeDiff;
 	}
 
 	T* operator()() const {

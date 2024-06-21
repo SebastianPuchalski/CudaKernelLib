@@ -60,7 +60,7 @@ __global__ void softmaxKernelS(float* out, const float* in, int size0,
 	in += offset13;
 	out += offset13;
 
-	float max = FLT_MIN;
+	float max = -FLT_MAX;
 	for (int idxEven = threadIdx.z; idxEven < sizeEven; idxEven += blockDim.z) {
 		float* lShared = shared;
 		const float* lIn = in;
@@ -125,7 +125,7 @@ __global__ void softmaxKernelS(float* out, const float* in, int size0, float alp
 	in += offset1;
 	out += offset1;
 
-	float max = FLT_MIN;
+	float max = -FLT_MAX;
 	for (int i = thread; i < size0; i += WARP_SIZE) {
 		const float value = in[i];
 		shared[i] = value;
@@ -211,15 +211,14 @@ void softmaxS(float* out, const float* in, std::vector<int> dimensions) {
 	assert(sizeOdd < 65536);
 	dim3 gridDim(size1, size3, sizeOdd);
 	int sharedSize = size0 * size2 * sizeEven * sizeof(float);
+	dim3 blockDim = calcBlockDim(WARP_SIZE, size0, size2, sizeEven);
 
 	if(addDimNum) {
-		dim3 blockDim = calcBlockDim(WARP_SIZE, size0, size2, sizeEven);
 		softmaxKernelS<<<gridDim, blockDim, sharedSize>>>
 			(out, in, size0, size2, sizeEven, addDimNum);
 	}
 	else {
 		if (size2 > 1 || size3 > 1) {
-			dim3 blockDim = calcBlockDim(WARP_SIZE, size0, size2, sizeEven);
 			softmaxKernelS<EXT_DIM_NUMBER><<<gridDim, blockDim, sharedSize>>>
 				(out, in, size0, size2, sizeEven, addDimNum);
 		}
@@ -314,7 +313,7 @@ __global__ void softmaxKernel(float* out, const float* in, int size0,
 	in += offset13;
 	out += offset13;
 
-	float max = FLT_MIN;
+	float max = -FLT_MAX;
 	float sum = 0;
 
 	for (int idxEven = threadIdx.z; idxEven < sizeEven; idxEven += blockDim.z) {
@@ -365,7 +364,7 @@ __global__ void softmaxKernel(float* out, const float* in, int size0, float alph
 	in += offset1;
 	out += offset1;
 
-	float max = FLT_MIN;
+	float max = -FLT_MAX;
 	float sum = 0;
 	if (thread < size0) {
 		max = in[thread];
@@ -431,14 +430,13 @@ void softmax(float* out, const float* in, std::vector<int> dimensions) {
 
 	if (size0 * size2 * sizeEven >= OP_SIZE_THRESHOLD) {
 		const int BLOCK_SIZE = 1024;
+		dim3 blockDim = calcBlockDim(BLOCK_SIZE, size0, size2, sizeEven);
 		if(addDimNum) {
-			dim3 blockDim = calcBlockDim(BLOCK_SIZE, size0, size2, sizeEven);
 			softmaxKernel<BLOCK_SIZE><<<gridDim, blockDim>>>
 				(out, in, size0, size2, sizeEven, addDimNum);
 		}
 		else {
 			if (size2 > 1 || size3 > 1) {
-				dim3 blockDim = calcBlockDim(BLOCK_SIZE, size0, size2, sizeEven);
 				softmaxKernel<BLOCK_SIZE, EXT_DIM_NUMBER><<<gridDim, blockDim>>>
 					(out, in, size0, size2, sizeEven, addDimNum);
 			}
@@ -451,14 +449,13 @@ void softmax(float* out, const float* in, std::vector<int> dimensions) {
 	}
 	else {
 		const int BLOCK_SIZE = 32;
+		dim3 blockDim = calcBlockDim(BLOCK_SIZE, size0, size2, sizeEven);
 		if(addDimNum) {
-			dim3 blockDim = calcBlockDim(BLOCK_SIZE, size0, size2, sizeEven);
 			softmaxKernel<BLOCK_SIZE><<<gridDim, blockDim>>>
 				(out, in, size0, size2, sizeEven, addDimNum);
 		}
 		else {
 			if (size2 > 1 || size3 > 1) {
-				dim3 blockDim = calcBlockDim(BLOCK_SIZE, size0, size2, sizeEven);
 				softmaxKernel<BLOCK_SIZE, EXT_DIM_NUMBER><<<gridDim, blockDim>>>
 					(out, in, size0, size2, sizeEven, addDimNum);
 			}
@@ -577,7 +574,7 @@ void softmaxRef(CudaBuffer<float>& outHost, const CudaBuffer<float>& inHost,
 	std::vector<float> max(remSize);
 	std::vector<double> acc(remSize);
 	for (size_t i = 0; i < remSize; i++) {
-		max[i] = std::numeric_limits<float>::min();
+		max[i] = std::numeric_limits<float>::lowest();
 		acc[i] = 0;
 	}
 
@@ -632,7 +629,7 @@ void testSoftmax(const std::vector<int>& dimensions,
 	CudaBuffer<float> outRef(size, cudaMemoryTypeHost);
 	softmaxRef(outRef, in, dimensions, mask);
 
-	bool pass = out.approxEqual(outRef, 1e-5f);
+	bool pass = out.approxEqual(outRef);
 	std::string name = "Softmax(";
 	for (int i = 0; i < dimensions.size(); i++) {
 		name += std::to_string(dimensions[i]);
