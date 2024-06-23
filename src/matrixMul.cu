@@ -425,8 +425,6 @@ using KernelFunction = void(*)(float*, const float*, const float*, int, int, int
 
 float matrixMul(CudaBuffer<float>& cHost, const CudaBuffer<float>& aHost, const CudaBuffer<float>& bHost,
 	            int cWidth, int cHeight, int aWidth, KernelFunction kernelFunc) {
-	assert(aWidth % 128 == 0); // row alligned with 512B block, TODO: use cudaMallocPitch
-	assert(cWidth % 128 == 0); // row alligned with 512B block, TODO: use cudaMallocPitch
 	CudaBuffer<float> cDev(cHost.size(), cudaMemoryTypeDevice);
 	CudaBuffer<float> aDev(aHost.size(), cudaMemoryTypeDevice);
 	CudaBuffer<float> bDev(bHost.size(), cudaMemoryTypeDevice);
@@ -507,11 +505,12 @@ void testMatrixMul(int cWidth, int cHeight, int aWidth,
 
 	bool pass = c.approxEqual(cRef);
 	std::string name = "MatrixMul";
-	name += kernelName + "(";
+	name += kernelName + " (";
 	name += std::to_string(cWidth) + "x";
 	name += std::to_string(cHeight);
 	name += ", " + std::to_string(aWidth) + ")";
 	printTestItem(name, pass, time);
+	checkCudaError(cudaDeviceReset());
 }
 
 void testMatrixMul() {
@@ -522,7 +521,4 @@ void testMatrixMul() {
 	testMatrixMul(1024, 1024, 1024, matrixMulSTTiled, "STTiled");
 	testMatrixMul(1024, 1024, 1024, matrixMulSWTiled, "SWTiled");
 	testMatrixMul(1024, 1024, 1024, matrixMulFast, "Fast");
-
-	checkCudaError(cudaGetLastError());
-	checkCudaError(cudaDeviceReset());
 }

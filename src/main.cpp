@@ -6,8 +6,8 @@
 #include <iostream>
 
 void test() {
-	/*testSoftmax();
-	testMatrixMul();*/
+	testSoftmax();
+	testMatrixMul();
 	testGeGLU();
 }
 

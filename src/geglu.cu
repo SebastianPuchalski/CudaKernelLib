@@ -100,6 +100,7 @@ void testGeGLU() {
 	checkCudaError(cudaSetDevice(0));
 
 	testGeGLU(64, 1024 * 128);
+	testGeGLU(27, 999 * 236);
 	testGeGLU(256, 1024 * 128);
 	testGeGLU(1024, 1024 * 128);
 }
