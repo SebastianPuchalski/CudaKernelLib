@@ -3,17 +3,27 @@
 #include <iostream>
 #include <iomanip>
 
+const int NAME_STR_LENGTH = 60;
+const int RESULT_STR_LENGTH = 10;
+const int TIME_STR_LENGTH = 10;
+
 void printTestHeader() {
-	std::cout << std::left << std::setw(90) << "Name:";
-	std::cout << std::left << std::setw(20) << "Time(ms.):";
-	std::cout << "Result:" << std::endl;
+	std::cout << std::left << std::setw(NAME_STR_LENGTH) << "Name";
+	std::cout << std::left << std::setw(RESULT_STR_LENGTH) << "Result";
+    std::cout << std::left << std::setw(TIME_STR_LENGTH) << "Time (ms)";
+    std::cout << "   Details" << std::endl;
 }
 
-void printTestItem(const std::string& name, float time, bool pass) {
-	assert(name.length() <= 50);
-	std::cout << std::left << std::setw(90) << name;
-	std::cout << std::left << std::setw(20) << time;
-	std::cout << (pass ? "\033[32mPASS" : "\033[31mFAIL") << "\033[0m\n";
+void printTestItem(const std::string& name, bool pass, float time, std::string addInfo) {
+	assert(name.length() <= (NAME_STR_LENGTH - 2));
+	std::cout << std::left << std::setw(NAME_STR_LENGTH) << name;
+	std::cout << (pass ? "\033[32m" : "\033[31m") <<
+        std::left << std::setw(RESULT_STR_LENGTH) <<
+        (pass ? "PASS" : "FAIL") << "\033[0m";
+    std::cout << std::left << std::setw(TIME_STR_LENGTH) << time;
+    if (!addInfo.empty())
+        std::cout << "   " << addInfo;
+    std::cout << std::endl;
 }
 
 bool checkCudaError(cudaError_t cudaError, bool noThrow) {
@@ -27,6 +37,15 @@ bool checkCudaError(cudaError_t cudaError, bool noThrow) {
 		throw std::runtime_error(errorString);
 	}
 	return false;
+}
+
+float getBestMemoryAccessTime(size_t dataSize) {
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, 0);
+    double clockRate = prop.memoryClockRate; // in kilohertz
+    double busWidth = prop.memoryBusWidth; // in bits
+    double bandwidth = (clockRate * 1000 * 2) * (busWidth / 8);
+    return dataSize / bandwidth; // in seconds
 }
 
 void printDevicesProperties() {

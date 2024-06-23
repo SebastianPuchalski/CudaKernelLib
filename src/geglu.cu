@@ -81,7 +81,7 @@ void testGeGLU(int batchSize, int dim, KernelFunction kernelFunc) {
 	std::string name = "GeGLU(";
 	name += std::to_string(batchSize) + "x";
 	name += std::to_string(dim) += ")";
-	printTestItem(name, time, pass);
+	printTestItem(name, pass, time);
 }
 
 void testGeGLU() {

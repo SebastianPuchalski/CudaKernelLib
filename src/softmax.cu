@@ -472,17 +472,19 @@ void flattenTensor(std::vector<int>& dimensions, std::vector<bool>& mask) {
 	assert(dimensions.size() == mask.size() && !dimensions.empty());
 	std::vector<int> newDimensions;
 	std::vector<bool> newMask;
-	bool prev = !mask.front();
+	bool previous = !mask.front();
 	for (int i = 0; i < dimensions.size(); i++) {
 		assert(dimensions[i] > 0);
-		if (mask[i] == prev) {
+		if(dimensions[i] == 1)
+			continue;
+		if (mask[i] == previous) {
 			newDimensions.back() *= dimensions[i];
 		}
 		else {
 			newDimensions.push_back(dimensions[i]);
 			newMask.push_back(mask[i]);
 		}
-		prev = mask[i];
+		previous = mask[i];
 	}
 	dimensions = newDimensions;
 	mask = newMask;
@@ -501,34 +503,18 @@ void softmax(float* out, const float* in,
 }
 
 float softmax(CudaBuffer<float>& outHost, const CudaBuffer<float>& inHost,
-	          const std::vector<int> dimensions, const std::vector<bool> mask) {
+	          const std::vector<int> dimensions, const std::vector<bool> mask,
+	          bool replaceWithMemcpy = false) {
 	CudaBuffer<float> outDev(outHost.size(), cudaMemoryTypeDevice);
 	CudaBuffer<float> inDev(inHost.size(), cudaMemoryTypeDevice);
 	inDev.copyFrom(inHost);
 
 	CudaEvent start, stop;
 	start.record();
-	softmax(outDev(), inDev(), dimensions, mask);
-	checkCudaError(cudaGetLastError());
-	stop.record();
-	stop.synchronize();
-	float elapsedTime = start.elapsedTime(stop);
-
-	checkCudaError(cudaDeviceSynchronize());
-	outHost.copyFrom(outDev);
-
-	return elapsedTime;
-}
-
-float softmaxMemCopy(CudaBuffer<float>& outHost, const CudaBuffer<float>& inHost,
-	const std::vector<int> dimensions, const std::vector<bool> mask) {
-	CudaBuffer<float> outDev(outHost.size(), cudaMemoryTypeDevice);
-	CudaBuffer<float> inDev(inHost.size(), cudaMemoryTypeDevice);
-	inDev.copyFrom(inHost);
-
-	CudaEvent start, stop;
-	start.record();
-	outDev.copyFrom(inDev); // kernel replaced with cudaMemcpy
+	if(replaceWithMemcpy)
+		outDev.copyFrom(inDev);
+	else
+		softmax(outDev(), inDev(), dimensions, mask);
 	checkCudaError(cudaGetLastError());
 	stop.record();
 	stop.synchronize();
@@ -596,21 +582,6 @@ void softmaxRef(CudaBuffer<float>& outHost, const CudaBuffer<float>& inHost,
 	}
 }
 
-double getTheoreticalTime(const std::vector<int>& dimensions) {
-	cudaDeviceProp prop;
-	cudaGetDeviceProperties(&prop, 0);
-	double clockRate = prop.memoryClockRate; // in kilohertz
-	double busWidth = prop.memoryBusWidth; // in bits
-	double bandwidth = (clockRate * 1000 * 2) * (busWidth / 8);
-
-	size_t tensorSize = sizeof(float);
-	for (auto d : dimensions)
-		tensorSize *= d;
-
-	double tensorAccessInSec = tensorSize / bandwidth;
-	return tensorAccessInSec * 2 * 1000; // in milliseconds
-}
-
 void testSoftmax(const std::vector<int>& dimensions,
 	             const std::vector<bool>& mask) {
 	if (dimensions.size() != mask.size() || mask.size() == 0)
@@ -624,31 +595,32 @@ void testSoftmax(const std::vector<int>& dimensions,
 	in.fillWithRandom(-100, 100);
 
 	CudaBuffer<float> out(size, cudaMemoryTypeHost);
-	float timeMemCopy = softmaxMemCopy(out, in, dimensions, mask);
-	float time = softmax(out, in, dimensions, mask);
+	float memcpyTime = softmax(out, in, dimensions, mask, true);
+	float kernelTime = softmax(out, in, dimensions, mask);
 	CudaBuffer<float> outRef(size, cudaMemoryTypeHost);
 	softmaxRef(outRef, in, dimensions, mask);
 
 	bool pass = out.approxEqual(outRef);
-	std::string name = "Softmax(";
+	std::string name = "Softmax (";
 	for (int i = 0; i < dimensions.size(); i++) {
+		if (mask[i]) name += "[";
 		name += std::to_string(dimensions[i]);
-		if (mask[i])
-			name += "_s";
+		if (mask[i]) name += "]";
 		if(i < dimensions.size() - 1)
 			name += ", ";
 	}
 	name += ")";
 
-	double theoreticalTime = getTheoreticalTime(dimensions);
-	float memCopyEff = theoreticalTime / timeMemCopy;
-	float kernelEff = theoreticalTime / time;
-	std::ostringstream ss;
-	ss << std::fixed << std::setprecision(2);
-	ss << "  " << memCopyEff * 100 << "% " << kernelEff * 100 << "%";
-	name += ss.str();
+	float theoreticalTime = getBestMemoryAccessTime(size * sizeof(float));
+	theoreticalTime *= 2 * 1000; // read and write in milliseconds
+	float memcpyEff = theoreticalTime / memcpyTime;
+	float kernelEff = theoreticalTime / kernelTime;
+	std::ostringstream addInfo;
+	addInfo << std::fixed << std::setprecision(0);
+	addInfo << "memcpy: " << memcpyEff * 100 << "%  ";
+	addInfo << "kernel: " << kernelEff * 100 << "%";
 
-	printTestItem(name, time, pass);
+	printTestItem(name, pass, kernelTime, addInfo.str());
 	checkCudaError(cudaDeviceReset());
 }
 
@@ -669,7 +641,8 @@ void testSoftmax() {
 	testSoftmax({ 999, 15, 1123, 8 }, { 1, 1, 0, 0 });
 	testSoftmax({ 1024, 32, 1024, 4 }, { 1, 1, 0, 0 });
 	testSoftmax({ 1024, 64, 1024, 2 }, { 1, 1, 0, 0 });
-	testSoftmax({ 1024, 128, 512, 2 }, { 1, 1, 0, 0 });
+	testSoftmax({ 1024, 128, 256, 2 }, { 1, 1, 0, 0 });
+	testSoftmax({ 1024, 512, 128, 2 }, { 1, 1, 0, 0 });
 
 	testSoftmax({ 14, 256, 32, 512 }, { 1, 0, 1, 0 });
 	testSoftmax({ 16, 256, 16, 512 }, { 1, 0, 1, 0 });
@@ -684,7 +657,4 @@ void testSoftmax() {
 	testSoftmax({ 256, 16, 64, 16, 4, 2 }, { 1, 0, 1, 0, 1, 0 });
 
 	testSoftmax({ 4, 4, 16, 8, 2, 8, 2, 2, 2, 2, 2, 4, 2, 2, 2 }, { 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0 });
-
-	checkCudaError(cudaGetLastError());
-	checkCudaError(cudaDeviceReset());
 }

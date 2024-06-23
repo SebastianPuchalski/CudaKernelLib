@@ -8,9 +8,11 @@
 #include "cuda_runtime.h"
 
 void printTestHeader();
-void printTestItem(const std::string& name, float time, bool pass);
+void printTestItem(const std::string& name, bool pass, float time, std::string addInfo = "");
 
 bool checkCudaError(cudaError_t cudaError, bool noThrow = false);
+
+float getBestMemoryAccessTime(size_t dataSize);
 
 void printDevicesProperties();
 

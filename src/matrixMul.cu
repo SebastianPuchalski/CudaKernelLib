@@ -511,7 +511,7 @@ void testMatrixMul(int cWidth, int cHeight, int aWidth,
 	name += std::to_string(cWidth) + "x";
 	name += std::to_string(cHeight);
 	name += ", " + std::to_string(aWidth) + ")";
-	printTestItem(name, time, pass);
+	printTestItem(name, pass, time);
 }
 
 void testMatrixMul() {
