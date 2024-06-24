@@ -18,7 +18,7 @@ General and fast implementation of softmax for tensors of arbitrary dimensions (
 
 Efficiency = maximum theoretical data transmission time / measured time
 
-**Constraints:** Softmax must be applied along the least significant dimension.
+**Constraints:** Softmax must be applied at least along the least significant dimension.
 
 ### Matrix multiplication
 
@@ -36,7 +36,7 @@ The implementation of matrix multiplication outperforms (3-10%) cuBLAS on the RT
 
 Simple implementation of GeGLU.
 
-| Size (batch, dim) | Time | Efficienty |
+| Size (batch, dim) | Time | Efficiency |
 |---|---|---|
 | (256, 1024*128) | 0.748ms | 93% |
 | (1024, 1024*128) | 3.146ms | 89% |
