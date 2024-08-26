@@ -16,7 +16,7 @@ General and fast implementation of softmax for tensors of arbitrary dimensions (
 | ([256], 16, [16], 16, [4], 8) | 1.023ms | 91% | 90% |
 | ([4], [4], [16], 8, 2, [8], [2], 2, 2, 2, 2, [4], 2, [2], 2) | 1.031ms | 90% | 90% |
 
-Efficiency = maximum theoretical data transmission time / measured time
+Efficiency = theoretical data transmission time / measured time
 
 **Constraints:** Softmax must be applied at least along the least significant dimension.
 
